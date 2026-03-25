@@ -1,0 +1,43 @@
+{
+  "name": "linkedin-job-scraper",
+  "version": "1.0.0",
+  "description": "LinkedIn job scraper — scrapes LinkedIn job listings into PostgreSQL with dedup, session management, and retry logic.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.base.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "tsx src/db/migrate.ts",
+    "trigger": "tsx scripts/trigger.ts",
+    "trigger:force": "tsx scripts/trigger.ts --force"
+  },
+  "keywords": [
+    "linkedin",
+    "job-scraper",
+    "scraping"
+  ],
+  "author": "Hongyi Tu",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.3.1",
+    "pg": "^8.20.0",
+    "pino": "^10.3.1",
+    "playwright": "^1.58.2",
+    "postgres-migrations": "^5.3.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8",
+    "@types/cheerio": "^1.0.0",
+    "@types/node": "^25.5.0",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
