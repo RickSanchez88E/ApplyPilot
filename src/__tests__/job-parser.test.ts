@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseJobDetailHtml, parseSearchResultsHtml } from "../job-parser.js";
+import { parseJobDetailHtml, parseSearchResultsHtml } from "../ingest/job-parser.js";
 
 describe("job-parser apply url extraction", () => {
   it("parses search result cards and normalizes LinkedIn URLs", () => {

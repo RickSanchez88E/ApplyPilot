@@ -1,10 +1,11 @@
 {
-  "name": "linkedin-job-scraper",
-  "version": "1.0.0",
-  "description": "LinkedIn job scraper — scrapes LinkedIn job listings into PostgreSQL with dedup, session management, and retry logic.",
+  "name": "job-scraper",
+  "version": "1.1.0",
+  "description": "Multi-ATS job scraper — scrapes job listings from 11 ATS platforms into PostgreSQL with dedup, session management, and retry logic.",
   "type": "module",
   "scripts": {
     "dev": "tsx --watch src/index.ts",
+    "dev:server": "tsx --watch src/server.ts",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.base.json",
     "typecheck": "tsc --noEmit",
@@ -13,27 +14,41 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "migrate": "tsx src/db/migrate.ts",
+    "db:reset": "tsx scripts/db-reset.ts",
+    "db:fresh": "tsx scripts/db-reset.ts && tsx src/db/migrate.ts",
     "trigger": "tsx scripts/trigger.ts",
-    "trigger:force": "tsx scripts/trigger.ts --force"
+    "trigger:force": "tsx scripts/trigger.ts --force",
+    "trigger:multi": "tsx scripts/trigger-multi.ts",
+    "probe:jooble": "tsx scripts/probe-jooble-camoufox.ts",
+    "pplx": "bun run scripts/pplx-search.ts"
   },
   "keywords": [
-    "linkedin",
     "job-scraper",
-    "scraping"
+    "ats",
+    "scraping",
+    "multi-platform"
   ],
   "author": "Hongyi Tu",
   "license": "MIT",
   "dependencies": {
     "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "https-proxy-agent": "^8.0.0",
     "pg": "^8.20.0",
     "pino": "^10.3.1",
     "playwright": "^1.58.2",
-    "postgres-migrations": "^5.3.0"
+    "playwright-extra": "^4.3.6",
+    "postgres-migrations": "^5.3.0",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "undici": "^7.24.6"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
     "@types/cheerio": "^1.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
     "@types/pg": "^8.18.0",
     "tsx": "^4.21.0",

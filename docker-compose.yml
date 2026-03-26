@@ -1,13 +1,13 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: linkedin-scraper-db
+    container_name: job-scraper-db
     environment:
       POSTGRES_USER: orchestrator
       POSTGRES_PASSWORD: orchestrator
       POSTGRES_DB: job_orchestrator
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +15,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: job-scraper-app
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://orchestrator:orchestrator@postgres:5432/job_orchestrator
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

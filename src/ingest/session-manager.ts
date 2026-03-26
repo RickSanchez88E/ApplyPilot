@@ -1,6 +1,6 @@
-import { getConfig } from "./config.js";
-import { SessionExpiredError } from "./errors.js";
-import { createChildLogger } from "./logger.js";
+import { getConfig } from "../shared/config.js";
+import { SessionExpiredError } from "../shared/errors.js";
+import { createChildLogger } from "../lib/logger.js";
 
 const log = createChildLogger({ module: "session" });
 

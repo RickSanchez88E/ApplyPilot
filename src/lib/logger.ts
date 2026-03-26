@@ -1,5 +1,5 @@
 import pino from "pino";
-import { getConfig } from "./config.js";
+import { getConfig } from "../shared/config.js";
 
 let logger: pino.Logger | null = null;
 

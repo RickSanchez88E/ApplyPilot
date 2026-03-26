@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+@theme {
+  /* Light audit/workbench theme */
+  --color-bg: #F8F9FB;
+  --color-panel: #FFFFFF;
+  --color-surface: #F1F3F5;
+  --color-border: #E2E5EA;
+  --color-border-strong: #CDD1D8;
+  --color-accent: #1A73E8;
+  --color-accent-light: #E8F0FE;
+  --color-success: #188038;
+  --color-success-light: #E6F4EA;
+  --color-warning: #E37400;
+  --color-danger: #D93025;
+  --color-text: #1F2937;
+  --color-text-secondary: #5F6B7A;
+  --color-text-dim: #9CA3AF;
+  
+  --font-display: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+  --font-body: 'Plus Jakarta Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
+}
+
+/* Panel style */
+.panel {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06);
+}
+
+/* Table row hover */
+.table-row-hover {
+  transition: background 0.15s ease;
+}
+.table-row-hover:hover {
+  background: var(--color-surface);
+}
+
+/* Active filter pill */
+.pill-active {
+  background: var(--color-accent);
+  color: white;
+  font-weight: 500;
+}
+.pill-inactive {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+.pill-inactive:hover {
+  background: var(--color-border);
+  color: var(--color-text);
+}
+
+/* Pagination */
+.page-btn {
+  min-width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+  border: 1px solid var(--color-border);
+  background: white;
+  color: var(--color-text-secondary);
+}
+.page-btn:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+.page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.page-btn-active {
+  background: var(--color-accent) !important;
+  border-color: var(--color-accent) !important;
+  color: white !important;
+}

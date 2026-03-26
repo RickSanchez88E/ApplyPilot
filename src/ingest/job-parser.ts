@@ -5,19 +5,30 @@
 
 import * as cheerio from "cheerio";
 import { parseLinkedInJobDetailHtml } from "./linkedin-job-detail.js";
-import { createChildLogger } from "./logger.js";
-import type { NewJob } from "./types.js";
+import { createChildLogger } from "../lib/logger.js";
+import type { NewJob, AtsPlatform } from "../shared/types.js";
 
 const log = createChildLogger({ module: "parser" });
 
 const ATS_PATTERNS: ReadonlyArray<{
   readonly pattern: RegExp;
-  readonly platform: "workday" | "greenhouse" | "generic";
+  readonly platform: AtsPlatform;
 }> = [
   { pattern: /workday\.com/i, platform: "workday" },
   { pattern: /myworkdayjobs\.com/i, platform: "workday" },
   { pattern: /greenhouse\.io/i, platform: "greenhouse" },
   { pattern: /boards\.greenhouse/i, platform: "greenhouse" },
+  { pattern: /jobs\.lever\.co/i, platform: "lever" },
+  { pattern: /jobs\.ashbyhq\.com/i, platform: "ashby" },
+  { pattern: /apply\.workable\.com/i, platform: "workable" },
+  { pattern: /breezy\.hr/i, platform: "breezyhr" },
+  { pattern: /jobs\.smartrecruiters\.com/i, platform: "smartrecruiters" },
+  { pattern: /bamboohr\.com\/careers/i, platform: "bamboohr" },
+  { pattern: /bamboohr\.co\.uk\/jobs/i, platform: "bamboohr" },
+  { pattern: /successfactors\.com/i, platform: "successfactors" },
+  { pattern: /successfactors\.eu/i, platform: "successfactors" },
+  { pattern: /taleo\.net/i, platform: "taleo" },
+  { pattern: /icims\.com/i, platform: "icims" }
 ];
 
 /**
@@ -83,7 +94,7 @@ export function parseJobDetailHtml(html: string): {
   readonly jdRaw: string;
   readonly applyType: "easy_apply" | "external";
   readonly applyUrl: string | null;
-  readonly atsPlatform: "workday" | "greenhouse" | "generic" | null;
+  readonly atsPlatform: AtsPlatform | null;
 } {
   return parseLinkedInJobDetailHtml(html);
 }
@@ -97,7 +108,7 @@ export function mergeIntoNewJob(
     readonly jdRaw: string;
     readonly applyType: "easy_apply" | "external";
     readonly applyUrl: string | null;
-    readonly atsPlatform: "workday" | "greenhouse" | "generic" | null;
+    readonly atsPlatform: AtsPlatform | null;
   },
 ): NewJob {
   return {
@@ -112,6 +123,8 @@ export function mergeIntoNewJob(
     applyType: detail.applyType,
     applyUrl: detail.applyUrl ?? undefined,
     atsPlatform: detail.atsPlatform ?? undefined,
+    source: "linkedin",
+    sourceUrl: stub.linkedinUrl,
   };
 }
 
@@ -247,7 +260,7 @@ function getNestedString(obj: Record<string, unknown>, ...keys: string[]): strin
   return typeof current === "string" ? current : "";
 }
 
-export function detectAtsPlatform(url: string): "workday" | "greenhouse" | "generic" | null {
+export function detectAtsPlatform(url: string): AtsPlatform | null {
   for (const { pattern, platform } of ATS_PATTERNS) {
     if (pattern.test(url)) {
       return platform;

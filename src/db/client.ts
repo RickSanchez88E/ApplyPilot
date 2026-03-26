@@ -1,6 +1,6 @@
 import pg from "pg";
-import { getConfig } from "../config.js";
-import { createChildLogger } from "../logger.js";
+import { getConfig } from "../shared/config.js";
+import { createChildLogger } from "../lib/logger.js";
 
 const log = createChildLogger({ module: "db" });
 

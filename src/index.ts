@@ -10,12 +10,13 @@
  */
 
 import { closePool, query } from "./db/client.js";
-import { getConfig } from "./config.js";
-import { SessionExpiredError } from "./errors.js";
-import { createChildLogger } from "./logger.js";
-import { dedupAndInsert } from "./dedup.js";
-import { scrapeJobs } from "./linkedin-scraper.js";
-import { checkSessionHealth, createSession } from "./session-manager.js";
+import { getConfig } from "./shared/config.js";
+import { SessionExpiredError } from "./shared/errors.js";
+import { createChildLogger } from "./lib/logger.js";
+import { dedupAndInsert } from "./ingest/dedup.js";
+import { scrapeJobs } from "./ingest/linkedin-scraper.js";
+import { checkSessionHealth, createSession } from "./ingest/session-manager.js";
+import { updateProgress, resetProgress, incrementStat } from "./lib/progress.js";
 
 const log = createChildLogger({ module: "main" });
 
@@ -31,7 +32,7 @@ export async function shouldTriggerBatch(): Promise<{ trigger: boolean; reason: 
     `SELECT
        COUNT(*)::text AS total,
        COUNT(*) FILTER (WHERE state NOT IN ('applied', 'ignored', 'suspended'))::text AS unresolved
-     FROM jobs`,
+     FROM public.jobs_all`,
   );
 
   const row = countResult.rows[0];
@@ -52,75 +53,106 @@ export async function shouldTriggerBatch(): Promise<{ trigger: boolean; reason: 
   };
 }
 
-export async function runScrapeBatch(): Promise<number> {
+export async function runScrapeBatch(timeFilterOverride?: string): Promise<number> {
   const config = getConfig();
+
+  updateProgress({
+    stage: "checking_session",
+    percent: 5,
+    message: "Verifying LinkedIn session...",
+  });
 
   let session = createSession();
   session = await checkSessionHealth(session);
 
   if (!session.healthy) {
+    updateProgress({ stage: "error", percent: 0, message: "LinkedIn session is unhealthy" });
     log.error("LinkedIn session is unhealthy — aborting batch");
     return 0;
   }
 
   let totalInserted = 0;
 
-  for (const keywords of config.searchKeywords) {
-    try {
-      log.info({ keywords }, "Starting scrape for keyword set");
+  // Multi-pass: If override given, use it. Otherwise iterate through configured filters
+  // Default: ["r3600", "r86400"] = scrape 1h first (freshest), then 24h
+  const timeFilters = timeFilterOverride
+    ? [timeFilterOverride]
+    : config.searchTimeFilters;
 
-      const result = await scrapeJobs(
-        session,
-        keywords,
-        config.searchLocation,
-        config.searchTimeFilter,
-      );
+  for (const timeFilter of timeFilters) {
+    for (const keywords of config.searchKeywords) {
+      try {
+        log.info({ keywords, timeFilter }, "Starting scrape for keyword set");
 
-      if (result.jobs.length > 0) {
-        const dedupResult = await dedupAndInsert(result.jobs);
-        totalInserted += dedupResult.inserted;
+        const result = await scrapeJobs(
+          session,
+          keywords,
+          config.searchLocation,
+          timeFilter,
+        );
 
-        if (dedupResult.inserted > 0) {
-          await query(`SELECT pg_notify('new_job', $1)`, [
-            JSON.stringify({
-              inserted: dedupResult.inserted,
+        if (result.jobs.length > 0) {
+          updateProgress({
+            stage: "dedup_insert",
+            percent: 90,
+            message: `Deduplicating and inserting ${result.jobs.length} jobs...`,
+          });
+          const dedupResult = await dedupAndInsert(result.jobs);
+          totalInserted += dedupResult.inserted;
+          incrementStat("jobsInserted", dedupResult.inserted);
+          incrementStat("jobsSkipped", dedupResult.skipped);
+
+          if (dedupResult.inserted > 0) {
+            await query(`SELECT pg_notify('new_job', $1)`, [
+              JSON.stringify({
+                inserted: dedupResult.inserted,
+                keywords,
+                timestamp: new Date().toISOString(),
+              }),
+            ]);
+
+            log.info({ inserted: dedupResult.inserted, keywords }, "Notified new_job channel");
+          }
+
+          log.info(
+            {
               keywords,
-              timestamp: new Date().toISOString(),
-            }),
-          ]);
-
-          log.info({ inserted: dedupResult.inserted, keywords }, "Notified new_job channel");
+              timeFilter,
+              scraped: result.jobs.length,
+              inserted: dedupResult.inserted,
+              skipped: dedupResult.skipped,
+              pagesScraped: result.pagesScraped,
+            },
+            "Scrape batch complete for keyword set",
+          );
+        } else {
+          log.info({ keywords, timeFilter }, "No new jobs found for keyword set");
+        }
+      } catch (err) {
+        if (err instanceof SessionExpiredError) {
+          log.error("Session expired — aborting remaining keyword sets this batch");
+          return totalInserted;
         }
 
-        log.info(
-          {
-            keywords,
-            scraped: result.jobs.length,
-            inserted: dedupResult.inserted,
-            skipped: dedupResult.skipped,
-            pagesScraped: result.pagesScraped,
-          },
-          "Scrape batch complete for keyword set",
-        );
-      } else {
-        log.info({ keywords }, "No new jobs found for keyword set");
+        log.error({ err, keywords, timeFilter }, "Error during scrape for keyword set, continuing");
       }
-    } catch (err) {
-      if (err instanceof SessionExpiredError) {
-        log.error("Session expired — aborting remaining keyword sets this batch");
-        break;
-      }
-
-      log.error({ err, keywords }, "Error during scrape for keyword set, continuing");
     }
   }
 
   return totalInserted;
 }
 
-export async function startScraper(options?: { force?: boolean }): Promise<BatchResult> {
+export async function startScraper(options?: { force?: boolean; timeFilter?: string }): Promise<BatchResult> {
   const config = getConfig();
   const force = options?.force ?? false;
+  const timeFilter = options?.timeFilter;
+
+  resetProgress();
+  updateProgress({
+    stage: "initializing",
+    percent: 0,
+    message: "Initializing scrape batch...",
+  });
 
   log.info(
     {
@@ -144,8 +176,13 @@ export async function startScraper(options?: { force?: boolean }): Promise<Batch
   let totalInserted = 0;
 
   try {
-    totalInserted = await runScrapeBatch();
+    totalInserted = await runScrapeBatch(timeFilter);
     const durationMs = Date.now() - cycleStart;
+    updateProgress({
+      stage: "completed",
+      percent: 100,
+      message: `Completed — ${totalInserted} new jobs inserted in ${(durationMs / 1000).toFixed(1)}s`,
+    });
     log.info({ totalInserted, durationMs }, "Scrape batch complete");
     return {
       triggered: true,
@@ -155,6 +192,11 @@ export async function startScraper(options?: { force?: boolean }): Promise<Batch
     };
   } catch (err) {
     const durationMs = Date.now() - cycleStart;
+    updateProgress({
+      stage: "error",
+      percent: 0,
+      message: `Batch failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
     log.error({ err, durationMs }, "Scrape batch failed");
     return {
       triggered: true,

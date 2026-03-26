@@ -3,12 +3,14 @@
  * DOM parsing first, Playwright only as dynamic fallback.
  */
 
-import { RateLimitError, ScrapingError, SessionExpiredError } from "./errors.js";
-import { createChildLogger } from "./logger.js";
-import type { NewJob } from "./types.js";
-import { hashUrl, sleepWithJitter, withRetry } from "./utils.js";
+import { RateLimitError, ScrapingError, SessionExpiredError } from "../shared/errors.js";
+import { createChildLogger } from "../lib/logger.js";
+import type { NewJob } from "../shared/types.js";
+import { hashUrl, sleepWithJitter, withRetry } from "../lib/utils.js";
 import { getExistingHashes } from "./dedup.js";
 import { mergeIntoNewJob, parseJobDetailHtml, parseSearchResultsHtml } from "./job-parser.js";
+import { enhanceJobWithAtsData } from "./ats-scraper.js";
+import { updateProgress, incrementStat } from "../lib/progress.js";
 import {
   assertSessionValid,
   buildLinkedInHeaders,
@@ -127,6 +129,15 @@ export async function scrapeJobs(
     const start = page * RESULTS_PER_PAGE;
     const searchUrl = buildSearchUrl(keywords, location, timeFilter, start);
 
+    updateProgress({
+      stage: "scraping_page",
+      current: page + 1,
+      total: MAX_PAGES,
+      percent: Math.round(((page) / MAX_PAGES) * 50),
+      message: `Fetching search page ${page + 1}/${MAX_PAGES} for "${keywords}"`,
+      keyword: keywords,
+    });
+
     log.info({ page: page + 1, start }, "Fetching search results page");
 
     let html: string;
@@ -139,6 +150,7 @@ export async function scrapeJobs(
     }
 
     pagesScraped += 1;
+    incrementStat("pagesScraped");
 
     const stubs = parseSearchResultsHtml(html);
     totalParsed += stubs.length;
@@ -159,9 +171,18 @@ export async function scrapeJobs(
       "Filtered search results",
     );
 
-    for (const stub of newStubs) {
+    for (let si = 0; si < newStubs.length; si++) {
+      const stub = newStubs[si]!;
       try {
         detailAttempts += 1;
+
+        updateProgress({
+          stage: "parsing_details",
+          current: si + 1,
+          total: newStubs.length,
+          percent: Math.round(50 + ((si) / Math.max(newStubs.length, 1)) * 30),
+          message: `Parsing job detail ${si + 1}/${newStubs.length} (page ${page + 1})`,
+        });
 
         await sleepWithJitter(REQUEST_DELAY_BASE_MS);
 
@@ -187,13 +208,26 @@ export async function scrapeJobs(
           );
         }
 
-        const newJob = mergeIntoNewJob(stub, detail);
+        let newJob = mergeIntoNewJob(stub, detail);
+        
+        // Enhance with native ATS data if applicable
+        if (newJob.atsPlatform && newJob.atsPlatform !== "generic") {
+          updateProgress({
+            stage: "ats_enhancement",
+            message: `Enhancing with ${newJob.atsPlatform} data...`,
+            percent: Math.round(80 + ((si) / Math.max(newStubs.length, 1)) * 10),
+          });
+        }
+        newJob = await enhanceJobWithAtsData(newJob);
+
         jobs.push(newJob);
+        incrementStat("jobsParsed");
 
         log.debug({ title: newJob.jobTitle, company: newJob.companyName }, "Parsed job detail");
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
         detailFailures += 1;
+        incrementStat("errors");
         log.warn({ err, url: stub.linkedinUrl }, "Failed to fetch job detail, skipping");
       }
     }

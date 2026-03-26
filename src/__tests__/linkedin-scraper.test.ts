@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionExpiredError } from "../errors.js";
+import { SessionExpiredError } from "../shared/errors.js";
 
 const getExistingHashesMock = vi.fn();
 const sleepWithJitterMock = vi.fn().mockResolvedValue(undefined);
 const withRetryMock = vi.fn(async (fn: () => Promise<string>) => await fn());
 
-vi.mock("../dedup.js", () => ({
+vi.mock("../ingest/dedup.js", () => ({
   getExistingHashes: getExistingHashesMock,
 }));
 
-vi.mock("../utils.js", async () => {
-  const actual = await vi.importActual<typeof import("../utils.js")>("../utils.js");
+vi.mock("../lib/utils.js", async () => {
+  const actual = await vi.importActual<typeof import("../lib/utils.js")>("../lib/utils.js");
   return {
     ...actual,
     sleepWithJitter: sleepWithJitterMock,
@@ -76,7 +76,7 @@ describe("linkedin-scraper", () => {
       )
       .mockResolvedValueOnce(new Response("", { status: 500 }));
 
-    const { scrapeJobs } = await import("../linkedin-scraper.js");
+    const { scrapeJobs } = await import("../ingest/linkedin-scraper.js");
     const result = await scrapeJobs(baseSession, "security engineer", "London", "r86400");
 
     expect(result.pagesScraped).toBe(1);
@@ -89,7 +89,7 @@ describe("linkedin-scraper", () => {
     getExistingHashesMock.mockResolvedValue(new Set());
     global.fetch = vi.fn().mockResolvedValueOnce(new Response("", { status: 500 }));
 
-    const { scrapeJobs } = await import("../linkedin-scraper.js");
+    const { scrapeJobs } = await import("../ingest/linkedin-scraper.js");
     const result = await scrapeJobs(baseSession, "security engineer", "London", "r86400");
 
     expect(result).toEqual({
@@ -120,7 +120,7 @@ describe("linkedin-scraper", () => {
       )
       .mockResolvedValueOnce(new Response("", { status: 403 }));
 
-    const { scrapeJobs } = await import("../linkedin-scraper.js");
+    const { scrapeJobs } = await import("../ingest/linkedin-scraper.js");
 
     await expect(
       scrapeJobs(baseSession, "security engineer", "London", "r86400"),

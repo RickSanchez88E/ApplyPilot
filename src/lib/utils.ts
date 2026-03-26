@@ -4,6 +4,19 @@ export function hashUrl(url: string): string {
   return createHash("sha256").update(url).digest("hex");
 }
 
+/**
+ * Cross-platform content fingerprint.
+ * Same company + same title on different platforms → same hash.
+ * Used to detect and group duplicate postings across sources.
+ */
+export function contentHash(companyName: string, jobTitle: string): string {
+  const normalized = [
+    companyName.toLowerCase().trim().replace(/\s+/g, " "),
+    jobTitle.toLowerCase().trim().replace(/\s+/g, " "),
+  ].join("|");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

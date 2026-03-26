@@ -4,7 +4,7 @@ import {
   checkSessionHealth,
   isSessionExpiredResponse,
   type SessionState,
-} from "../session-manager.js";
+} from "../ingest/session-manager.js";
 
 const baseSession: SessionState = {
   liAt: "cookie-value",
