@@ -20,6 +20,11 @@
     "trigger:force": "tsx scripts/trigger.ts --force",
     "trigger:multi": "tsx scripts/trigger-multi.ts",
     "probe:jooble": "tsx scripts/probe-jooble-camoufox.ts",
+    "backfill:jooble-apply": "tsx scripts/backfill-jooble-apply-urls.ts",
+    "probe:webshare-parallel": "tsx scripts/webshare-parallel-jooble-desc.ts",
+    "probe:webshare-cf": "tsx scripts/webshare-cf-concurrency-probe.ts",
+    "jooble:minimal-apply": "tsx scripts/jooble-minimal-apply-url.ts",
+    "jooble:webshare-apply": "tsx scripts/jooble-webshare-apply-scraper.ts",
     "pplx": "bun run scripts/pplx-search.ts"
   },
   "keywords": [

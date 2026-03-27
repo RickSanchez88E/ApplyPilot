@@ -80,8 +80,10 @@ export async function dedupAndInsert(jobs: ReadonlyArray<NewJob>): Promise<Dedup
         apply_type, apply_url, ats_platform,
         source, source_url, content_hash, state
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'pending')
-      ON CONFLICT (url_hash) DO NOTHING
-      RETURNING id`,
+      ON CONFLICT (url_hash) DO UPDATE SET
+        apply_url = COALESCE(EXCLUDED.apply_url, ${table}.apply_url),
+        jd_raw = CASE WHEN length(EXCLUDED.jd_raw) > length(COALESCE(${table}.jd_raw, '')) THEN EXCLUDED.jd_raw ELSE ${table}.jd_raw END
+      RETURNING id, (xmax = 0) AS is_new`,
       [
         job.linkedinUrl ?? null,
         urlHash,
@@ -103,10 +105,11 @@ export async function dedupAndInsert(jobs: ReadonlyArray<NewJob>): Promise<Dedup
     );
 
     if (result.rowCount && result.rowCount > 0) {
-      inserted += 1;
+      const row = result.rows[0];
+      const isNew = row?.is_new === true;
+      if (isNew) inserted += 1;
 
-      // Update content_index for cross-platform linking
-      const insertedId = result.rows[0]?.id;
+      const insertedId = row?.id;
       if (insertedId) {
         await query(
           `INSERT INTO ${CONTENT_INDEX_TABLE} (content_hash, source, source_job_id, source_url, company_name, job_title)

@@ -11,7 +11,7 @@ import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createChildLogger } from "./lib/logger.js";
-import { getProgress, onProgress, offProgress, type ProgressState } from "./lib/progress.js";
+import { getProgress, onProgress, offProgress, updateProgress, resetProgress, type ProgressState } from "./lib/progress.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -195,6 +195,7 @@ app.post("/api/trigger", async (req, res) => {
   }
 
   isScraping = true;
+  resetProgress();
   const { timeFilter } = req.body ?? {};
   res.json({ status: "started", timeFilter: timeFilter ?? "multi-pass" });
 
@@ -204,6 +205,11 @@ app.post("/api/trigger", async (req, res) => {
     lastScrapeResult = result;
   } catch (err) {
     log.error({ err }, "API triggered scrape failed");
+    updateProgress({
+      stage: "error",
+      percent: 0,
+      message: `Scrape failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+    });
   } finally {
     isScraping = false;
   }
@@ -217,6 +223,7 @@ app.post("/api/trigger/multi", async (req, res) => {
   }
 
   isScraping = true;
+  resetProgress();
 
   try {
     const { sources, timeFilter } = req.body ?? {};
@@ -294,6 +301,11 @@ app.post("/api/trigger/multi", async (req, res) => {
     }
   } catch (err) {
     log.error({ err }, "Multi-source scrape failed");
+    updateProgress({
+      stage: "error",
+      percent: 0,
+      message: `Scrape failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+    });
   } finally {
     isScraping = false;
   }
@@ -310,10 +322,16 @@ app.post("/api/schedule", (req, res) => {
       if (!isScraping) {
         try {
           isScraping = true;
+          resetProgress();
           log.info("Scheduled trigger firing");
           lastScrapeResult = await startScraper({ force: false });
         } catch (e) {
           log.error({ err: e }, "Scheduled scrape failed");
+          updateProgress({
+            stage: "error",
+            percent: 0,
+            message: `Scheduled scrape failed: ${e instanceof Error ? e.message : "Unknown error"}`,
+          });
         } finally {
           isScraping = false;
           nextRunAt = new Date(Date.now() + interval);

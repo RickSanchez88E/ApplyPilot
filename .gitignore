@@ -6,6 +6,7 @@ dist/
 coverage/
 tmp-chrome-*/
 .cdp-profile/
+.cdp-profiles-proxy/
 *.db
 *.sqlite
 *.sqlite3

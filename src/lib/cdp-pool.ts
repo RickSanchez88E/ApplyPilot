@@ -112,17 +112,22 @@ export async function getCdpContext(): Promise<BrowserContext> {
 async function launchChrome(): Promise<void> {
   log.info("Launching headless Chrome for CDP scraping...");
 
+  const baseArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+  ];
+  if (process.env.NODE_ENV === "production" || process.env.CHROME_NO_SANDBOX === "1") {
+    baseArgs.push("--no-sandbox", "--disable-setuid-sandbox");
+  }
+
   try {
     _context = await chromium.launchPersistentContext(CDP_PROFILE_DIR, {
       headless: true,
       channel: "chrome",
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-      ],
+      args: baseArgs,
       viewport: { width: 1366, height: 900 },
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -165,8 +170,102 @@ async function launchChrome(): Promise<void> {
 /**
  * Check if a page title indicates CF challenge.
  */
-function isCfBlocked(title: string): boolean {
+export function isCfBlocked(title: string): boolean {
   return /just a moment|checking your browser|performing security|attention required/i.test(title);
+}
+
+/**
+ * Load URL in an existing tab and resolve CF interstitial (cf-bypass-scraper skill:
+ * same persistent Chrome session, cookies carry across navigations — prefer this
+ * for many Jooble /desc/ URLs instead of opening one new tab per URL).
+ */
+async function loadPageWithCfResolution(
+  page: Page,
+  url: string,
+  options?: { referer?: string; timeoutMs?: number; omitHtml?: boolean },
+): Promise<{ html: string; title: string; blocked: boolean }> {
+  const omitHtml = options?.omitHtml ?? false;
+
+  await page.goto(url, {
+    waitUntil: "domcontentloaded",
+    timeout: options?.timeoutMs ?? 20_000,
+    referer: options?.referer,
+  });
+
+  await page.waitForTimeout(1500);
+
+  let title = await page.title();
+  let html = omitHtml ? "" : await page.content();
+  let blocked = isCfBlocked(title);
+
+  if (blocked) {
+    recordCfHit();
+    log.info(
+      { url: url.slice(0, 80), concurrency: `${_activePages}/${getMaxConcurrency()}` },
+      "CF challenge detected, waiting 15s...",
+    );
+    try {
+      await page.waitForTimeout(15_000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/closed|Target page/i.test(msg)) {
+        log.error({ url: url.slice(0, 80) }, "Page/browser closed during CF wait (15s) — aborting navigation");
+      }
+      throw e;
+    }
+    title = await page.title();
+    html = omitHtml ? "" : await page.content();
+    blocked = isCfBlocked(title);
+
+    if (blocked) {
+      log.warn({ url: url.slice(0, 80) }, "CF still blocking after 15s, waiting 20s more...");
+      try {
+        await page.waitForTimeout(20_000);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/closed|Target page/i.test(msg)) {
+          log.error({ url: url.slice(0, 80) }, "Page/browser closed during CF wait (20s) — reduce /desc/ rate or retry");
+        }
+        throw e;
+      }
+      title = await page.title();
+      html = omitHtml ? "" : await page.content();
+      blocked = isCfBlocked(title);
+    }
+  }
+
+  return { html, title, blocked };
+}
+
+/**
+ * Navigate in an already-open tab (does not acquire a pool slot). Caller must own
+ * a slot via {@link withCdpTab} or equivalent.
+ */
+export async function navigateExistingPage(
+  page: Page,
+  url: string,
+  options?: { referer?: string; timeoutMs?: number; omitHtml?: boolean },
+): Promise<{ html: string; title: string; blocked: boolean }> {
+  return loadPageWithCfResolution(page, url, options);
+}
+
+/**
+ * Run work with a single CDP tab: one slot, one `cf_clearance` session, sequential
+ * navigations — reduces parallel CF challenges vs many newPage() calls (see cf-bypass-scraper skill).
+ */
+export async function withCdpTab<T>(work: (page: Page) => Promise<T>): Promise<T> {
+  await acquireSlot();
+  _totalRequests++;
+
+  const ctx = await getCdpContext();
+  const page = await ctx.newPage();
+
+  try {
+    return await work(page);
+  } finally {
+    await page.close().catch(() => {});
+    releaseSlot();
+  }
 }
 
 /**
@@ -179,7 +278,7 @@ function isCfBlocked(title: string): boolean {
  */
 export async function navigateWithCf(
   url: string,
-  options?: { referer?: string; timeoutMs?: number },
+  options?: { referer?: string; timeoutMs?: number; omitHtml?: boolean },
 ): Promise<{ page: Page; html: string; title: string; blocked: boolean }> {
   await acquireSlot();
   _totalRequests++;
@@ -188,40 +287,7 @@ export async function navigateWithCf(
   const page = await ctx.newPage();
 
   try {
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: options?.timeoutMs ?? 20_000,
-      referer: options?.referer,
-    });
-
-    // Smart wait: 1.5s is enough for most pages when CF session is active
-    await page.waitForTimeout(1500);
-
-    let title = await page.title();
-    let html = await page.content();
-    let blocked = isCfBlocked(title);
-
-    if (blocked) {
-      recordCfHit();
-      log.info(
-        { url: url.slice(0, 80), concurrency: `${_activePages}/${getMaxConcurrency()}` },
-        "CF challenge detected, waiting 15s...",
-      );
-      await page.waitForTimeout(15_000);
-      title = await page.title();
-      html = await page.content();
-      blocked = isCfBlocked(title);
-
-      if (blocked) {
-        // Still blocked after 15s — try one more time with longer wait
-        log.warn({ url: url.slice(0, 80) }, "CF still blocking after 15s, waiting 20s more...");
-        await page.waitForTimeout(20_000);
-        title = await page.title();
-        html = await page.content();
-        blocked = isCfBlocked(title);
-      }
-    }
-
+    const { html, title, blocked } = await loadPageWithCfResolution(page, url, options);
     return { page, html, title, blocked };
   } catch (err) {
     await page.close().catch(() => {});

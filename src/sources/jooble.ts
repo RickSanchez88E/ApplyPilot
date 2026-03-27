@@ -15,7 +15,7 @@
 import type { SourceAdapter, FetchOptions } from "./adapter.js";
 import type { NewJob } from "../shared/types.js";
 import { createChildLogger } from "../lib/logger.js";
-import { scrapeJoobleForKeyword } from "./jooble-browser.js";
+import { isExternalEmployerApplyUrl, scrapeJoobleForKeyword } from "./jooble-browser.js";
 
 const log = createChildLogger({ module: "source-jooble" });
 
@@ -91,13 +91,15 @@ export const joobleAdapter: SourceAdapter = {
             continue;
           }
 
+          const applyUrl = isExternalEmployerApplyUrl(detail.applyUrl) ? detail.applyUrl : undefined;
+
           allJobs.push({
             companyName: detail.company || "Unknown",
             jobTitle: detail.title,
             location: detail.location || location,
             salaryText: detail.salary || undefined,
             jdRaw: detail.description,
-            applyUrl: detail.applyUrl || detail.sourceUrl,
+            applyUrl,
             applyType: "external",
             source: "jooble",
             sourceUrl: detail.sourceUrl,

@@ -153,8 +153,19 @@ For reference, these approaches were tested against Jooble (Cloudflare Managed C
 - **Playwright** npm package (`npm install playwright`)
 - Ports 9222 (optional debug) and 9333 (CDP pool) available
 
+## Jooble: many `/desc/` URLs (apply link extraction)
+
+Opening **one new tab per URL** causes many parallel CF challenges and rate limits. Prefer:
+
+1. **`withCdpTab()`** (`src/lib/cdp-pool.ts`) — acquires **one** pool slot and **one** `Page`.
+2. **`navigateExistingPage(page, url)`** — `goto` + same CF wait logic as `navigateWithCf`, **without** a new tab.
+3. **`scrapeJoobleDescOnPage(page, descUrl)`** (`src/sources/jooble-browser.ts`) — parse employer apply URL from the loaded DOM.
+
+Live scrape (`scrapeJoobleForKeyword`) and CLI backfill (`scripts/backfill-jooble-apply-urls.ts`) use this **single-tab sequential** pattern so `cf_clearance` stays warm and concurrency stays at **one** tab for the whole batch.
+
 ## Files
 
-- `src/lib/cdp-pool.ts` — CDP browser pool manager
-- `src/sources/jooble-browser.ts` — Example integration for Jooble
-- `src/sources/jooble.ts` — Example source adapter using CDP pool
+- `src/lib/cdp-pool.ts` — CDP browser pool manager (`navigateWithCf`, `navigateExistingPage`, `withCdpTab`)
+- `src/sources/jooble-browser.ts` — Jooble integration (`scrapeJoobleDescOnPage`, `scrapeJoobleDesc`)
+- `src/sources/jooble.ts` — Source adapter using CDP pool
+- `scripts/backfill-jooble-apply-urls.ts` — DB backfill using `withCdpTab` + `scrapeJoobleDescOnPage`

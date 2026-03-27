@@ -13,11 +13,14 @@ const log = createChildLogger({ module: "dead-letter" });
 const EXPIRED_PATTERNS = [
   /the job has expired/i,
   /this job is no longer available/i,
+  /the job position is no longer available/i,
+  /job position is no longer available/i,
   /this position has been filled/i,
   /listing has expired/i,
   /no longer accepting applications/i,
   /job not found/i,
   /this vacancy has been closed/i,
+  /position is no longer available/i,
 ];
 
 /** Check a single URL to see if the job is expired (via HTTP HEAD/GET) */
@@ -43,6 +46,33 @@ async function isUrlExpired(url: string): Promise<boolean> {
     // Network error — don't mark as expired, could be temporary
     return false;
   }
+}
+
+/**
+ * Jooble: "no longer available" appears on Jooble `/desc/` HTML, not on the employer careers URL.
+ * Other sources: single URL (prefer apply, else source).
+ */
+async function isExpiredForRow(
+  sourceName: string,
+  applyUrl: string,
+  sourceUrl: string,
+): Promise<boolean> {
+  const apply = applyUrl?.trim() || "";
+  const src = sourceUrl?.trim() || "";
+
+  if (sourceName === "jooble") {
+    const ordered: string[] = [];
+    if (src) ordered.push(src);
+    if (apply && apply !== src) ordered.push(apply);
+    for (const u of ordered) {
+      if (u && u !== "#" && (await isUrlExpired(u))) return true;
+    }
+    return false;
+  }
+
+  const primary = apply || src;
+  if (!primary || primary === "#") return false;
+  return isUrlExpired(primary);
 }
 
 export interface DeadLetterResult {
@@ -85,17 +115,18 @@ export async function runDeadLetterScan(
     );
 
     for (const job of jobs.rows) {
-      const url = job.apply_url || job.source_url;
-      if (!url || url === "#") continue;
+      if ((!job.apply_url && !job.source_url) || (job.apply_url === "#" && job.source_url === "#")) {
+        continue;
+      }
 
       result.checked++;
       try {
-        const expired = await isUrlExpired(url);
+        const expired = await isExpiredForRow(sourceName, job.apply_url, job.source_url);
         if (expired) {
           result.expired++;
-          // Delete expired job
           await query(`DELETE FROM ${nspname}.jobs WHERE id = $1`, [job.id]);
           result.deleted++;
+          const url = sourceName === "jooble" ? job.source_url || job.apply_url : job.apply_url || job.source_url;
           result.details.push({
             id: job.id,
             title: job.job_title,
@@ -109,7 +140,6 @@ export async function runDeadLetterScan(
         log.warn({ err, id: job.id }, "Error checking job expiry");
       }
 
-      // Be nice — small delay between checks
       await new Promise((r) => setTimeout(r, 500));
     }
   }

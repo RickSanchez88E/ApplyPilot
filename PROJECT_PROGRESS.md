@@ -88,9 +88,24 @@ PostgreSQL: job_orchestrator (port 5433)
 | 层级 | 目标平台 | 代理 |
 |------|----------|------|
 | LinkedIn | LinkedIn Guest API | ❌ Cookie 直连 |
-| API Sources | DevITJobs, Reed, Jooble, HN, RemoteOK | ❌ API 直连 |
+| API Sources | DevITJobs, Reed, HN, RemoteOK | ❌ API 直连 |
+| Jooble /desc/ | Jooble 详情页外链解析 | ✅ Webshare 住宅代理 (最小带宽) |
 | Phase 2 ATS | Greenhouse, Lever, Ashby 等 | ❌ 公开页面 |
 | Phase 3 ATS | Workday, iCIMS, Taleo | ✅ Webshare + Camoufox |
+
+### Jooble Webshare 集成 (2026-03-27)
+- **搜索页**：本地 CDP Chrome（不消耗代理流量）
+- **/desc/ 页**：Webshare 住宅代理 + 最小带宽（`JOOBLE_DESC_MINIMAL_BANDWIDTH=1`）
+  - 拦截 images/CSS/fonts/media（`attachMinimalBandwidthRoutes`）
+  - 仅运行 `JOOBLE_APPLY_ONLY_SCRIPT`（不拉 JD/公司/薪资长文本）
+  - `omitHtml: true`（不传整页 HTML 到 Node）
+- **代理选择**：
+  - 通过 `proxy_list_download_token` 获取正确的 `host:port:user:pass` 格式
+  - 住宅代理端口 80（不是 API list 返回的 10000）
+  - 自动尝试 5 个代理槽（`rgzrbzwz-N`），跳过不可达的
+  - Tunnel failure 检测：连续 2 次隧道失败立即停止，节省带宽
+  - CF 连续封锁 3 次也停止
+- **结果**：18 岗位中 10 个获得真实外链（ev.careers, greenhouse.io, gd.com 等）
 
 ---
 
@@ -209,10 +224,56 @@ PostgreSQL: job_orchestrator (port 5433)
 
 改动文件：`index.css`（全量重写）、`index.html`（结构调整）、`features/jobs/jobs.js`、`features/sources/sources.js`、`features/analytics/chart.js`
 
+### Webshare 并行探测（2026-03-27）
+- [x] `listWebshareBrowserProxies(n)`（`src/lib/webshare.ts`）从 API 拉取多条代理（默认先试 `backbone` 再 `direct`）
+- [x] `yarn probe:webshare-parallel` / `scripts/webshare-parallel-jooble-desc.ts`：1 本机 + 3 Webshare 代理上下文，**4 并发** worker 跑 **5 个 URL**（独立 Playwright `browser.newContext({ proxy })`，不占主 CDP 池）
+- [x] `yarn probe:webshare-cf` / `scripts/webshare-cf-concurrency-probe.ts`：仅 Webshare 上下文，阶梯并发（默认 1→12）测 Jooble 是否出现 CF 标题/HTML 启发式；**单次实测可到 12 并发仍未触发 CF**（以当时 IP/线路为准）
+
+### Jooble：雇主申请外链 + 过期页（2026-03-27）
+- [x] `/desc/` 页不再把 Jooble URL 当作 `apply_url`：从 DOM 中对外链打分选取雇主/ATS 链接（含 `utm_source=jooble` 等）
+- [x] `source_url` 固定为 canonical Jooble `/desc/...`；`apply_url` 仅在有合法外链时写入
+- [x] 每条职位（可配置上限）拉取 `/desc/` 解析 apply；下架文案（如 “The job position is no longer available”）跳过入库
+- [x] 死信扫描补充 Jooble 常见下架英文句式；Jooble 行 **优先探测 `source_url`（/desc/）** 再探测 `apply_url`（下架文案在 Jooble 页，不在雇主站）
+- [x] 说明：死信 **仅** 在调用 `POST /api/dead-letter/scan` 时执行，无内置定时任务
+- [x] **Jooble 存量外链回填**：`yarn backfill:jooble-apply`（`scripts/backfill-jooble-apply-urls.ts`）对 `apply_url` 为空或仍为 Jooble 域名的行按 `source_url` 重开 `/desc/` 解析雇主 `apply_url`（默认每批 30 条，可 `--limit=` / `--dry-run`）；与线上一致使用 **`withCdpTab` + `scrapeJoobleDescOnPage` 单标签串行**（cf-bypass-scraper：持久会话、降低并行挑战）
+
+### Jooble /desc/ 省带宽（2026-03-27）
+- [x] `minimalBandwidth` + `attachMinimalBandwidthRoutes`：拦截 image / stylesheet / font / media；`loadPageWithCfResolution` 支持 **`omitHtml`**（不调用 `page.content()` 把整页 HTML 拉回 Node）
+- [x] 环境变量 **`JOOBLE_DESC_MINIMAL_BANDWIDTH=1`** 时批量走省流量路径；页面内用 **`JOOBLE_APPLY_ONLY_SCRIPT`** 只取 apply 相关 DOM
+- [x] **`yarn jooble:minimal-apply -- "https://jooble.org/desc/..."`**（`scripts/jooble-minimal-apply-url.ts`）单条 URL 测雇主 `applyUrl`；**不是**「只发一个 HTTP 请求」——主文档与站点所需 JS 仍会计入代理带宽
+- [x] `.env.example`：Webshare key 占位；注释 `JOOBLE_DESC_MINIMAL_BANDWIDTH` / `CF_PROBE_MINIMAL_BANDWIDTH`
+
+### Per-Proxy Persistent Context + /away/ 外链提取（2026-03-27）
+- [x] **`yarn jooble:webshare-apply`**（`scripts/jooble-webshare-apply-scraper.ts`）：每个 Webshare proxy **独立 `launchPersistentContext`**（cf-bypass-scraper 模式，独立 `--user-data-dir`，`channel: "chrome"`），三阶段 warmup（首页 → 搜索 → /desc/）建立 `cf_clearance`
+- [x] **关键发现 1**：Jooble `/desc/` 裸 URL（无 `sid`/`ckey`/`elckey` query 参数）会被 CF/WAF 拦截；**必须带完整 session 参数**才能通过
+- [x] **关键发现 2**：Jooble "Apply" 按钮是 `<a href="/away/{id}?...">`，通过 JS 重定向到雇主 ATS；DOM 层面无直接外链。需打开 `/away/` 新 tab → 等 URL 跳出 `jooble.org` → 拿到雇主 URL
+- [x] 提取函数 `extractApplyOnlyFromLoadedPage` 已导出，供外部脚本直接调用（不通过 `page.goto()`）
+- [x] `isCfBlocked` 从 `cdp-pool.ts` 导出
+- [x] `.cdp-profiles-proxy/` 加入 `.gitignore`
+- [x] 实测：`direct` persistent context → `https://ev.careers/jobs/311576244-software-engineer?utm_source=jooble` ✓
+
+### Docker 前端集成（2026-03-27）
+- [x] **Dockerfile 多阶段构建**：3 个 stage（frontend-builder → backend-builder → runner）
+  - Stage 1: `node:22-alpine` + npm ci → `vite build` → 输出到 `/app/public/`
+  - Stage 2: `node:22-alpine` + pnpm → `tsc` → 输出到 `/app/dist/`
+  - Stage 3: `node:22-bookworm-slim` + Playwright Chromium（Jooble browser adapter 依赖）
+- [x] **pnpm-lock.yaml 同步**：补齐 `playwright-extra`、`puppeteer-extra-plugin-stealth` 两个新增依赖
+- [x] **.dockerignore 更新**：排除 `node_modules`、`.cdp-profile*`、`.agents`、`tmp` 等
+- [x] **HEALTHCHECK 改为 Node fetch**：替代 Alpine wget（Debian slim 无 wget）
+- [x] 构建验证通过：`docker compose build app` → `docker compose up app -d` → 健康检查 healthy
+- [x] 前端 + API 同容器运行：`http://localhost:3000`（前端 HTML）+ `/api/status`（API）
+- [x] 本地 Vite dev server 已停止
+
+### Progress Bar 卡住修复（2026-03-27）
+- [x] **Bug**: dispatch 完成后 `isScraping=false`（health poll 显示 "Scrape complete"），但 SSE progress 卡在 `scraping_page`
+- [x] **Root cause**: `server.ts` 的 `catch` 块只设 `isScraping=false`，不更新 progress → SSE 永远不推送 "completed"/"error"
+- [x] **Fix 1**: 三个 trigger 入口（LinkedIn / multi / scheduled）开始时调 `resetProgress()` 清旧状态
+- [x] **Fix 2**: `catch` 块追加 `updateProgress({ stage: "error", message })` 确保前端收到错误态
+- [x] **Fix 3**: `ProgressBar.tsx` 增加 8 秒 auto-dismiss（completed/error 后自动隐藏）
+
 ### 后续待办
 - [ ] **路由层提取**：从 `server.ts` 提取路由到 `src/routes/` 目录
 - [ ] 表格排序方向指示器（`▲/▼` 替代 `↕`）
 - [ ] Start/Stop 按钮颜色进一步克制
 - [ ] 移动端 responsive 验证
-- [ ] 当项目需要 React/Vite 时，执行 `apps/web` 物理分离
 

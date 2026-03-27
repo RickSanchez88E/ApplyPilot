@@ -1,8 +1,14 @@
 node_modules
+frontend/node_modules
 dist
 .git
 .env
-*.md
 .vscode
 .idea
 *.log
+.cdp-profile
+.cdp-profiles-proxy
+.agents
+artifacts
+tmp
+.tmp

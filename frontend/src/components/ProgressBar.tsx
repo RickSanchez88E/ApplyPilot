@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ProgressState } from '../hooks/useProgress';
 
@@ -13,15 +14,31 @@ const STAGE_LABELS: Record<string, string> = {
   error: 'Error',
 };
 
+const AUTO_DISMISS_MS = 8000;
+
 export function ProgressBar({ progress }: { progress: ProgressState | null }) {
+  const [dismissed, setDismissed] = useState(false);
+
+  const stage = progress?.stage ?? 'idle';
+  const isTerminal = stage === 'completed' || stage === 'error';
+
+  useEffect(() => {
+    if (!isTerminal) {
+      setDismissed(false);
+      return;
+    }
+    const timer = setTimeout(() => setDismissed(true), AUTO_DISMISS_MS);
+    return () => clearTimeout(timer);
+  }, [isTerminal, progress?.updatedAt]);
+
   if (!progress) return null;
 
-  const { stage, percent, message, stats } = progress;
+  const { percent, message, stats } = progress;
   const isActive = stage !== 'idle' && stage !== 'completed' && stage !== 'error';
   const isComplete = stage === 'completed';
   const isError = stage === 'error';
 
-  if (stage === 'idle') return null;
+  if (stage === 'idle' || dismissed) return null;
 
   return (
     <AnimatePresence>

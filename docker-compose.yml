@@ -26,6 +26,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://orchestrator:orchestrator@postgres:5432/job_orchestrator
+      JOOBLE_DESC_MINIMAL_BANDWIDTH: "1"
+      CHROME_NO_SANDBOX: "1"
     depends_on:
       postgres:
         condition: service_healthy
