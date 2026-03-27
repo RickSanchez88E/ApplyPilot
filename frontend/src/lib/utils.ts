@@ -17,7 +17,7 @@ export const SOURCES: Record<string, { label: string, text: string, bg: string, 
   linkedin: { label: 'LinkedIn', text: 'text-blue-700', bg: 'bg-blue-50', linkReliable: true },
   devitjobs: { label: 'DevIT', text: 'text-emerald-700', bg: 'bg-emerald-50', linkReliable: true },
   reed: { label: 'Reed', text: 'text-rose-700', bg: 'bg-rose-50', linkReliable: true },
-  jooble: { label: 'Jooble', text: 'text-indigo-700', bg: 'bg-indigo-50', linkReliable: false },
+  jooble: { label: 'Jooble', text: 'text-indigo-700', bg: 'bg-indigo-50', linkReliable: true },
   hn_hiring: { label: 'HN', text: 'text-orange-700', bg: 'bg-orange-50', linkReliable: true },
   remoteok: { label: 'RemoteOK', text: 'text-teal-700', bg: 'bg-teal-50', linkReliable: true },
 }

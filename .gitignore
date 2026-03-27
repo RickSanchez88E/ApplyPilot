@@ -5,6 +5,7 @@ dist/
 .DS_Store
 coverage/
 tmp-chrome-*/
+.cdp-profile/
 *.db
 *.sqlite
 *.sqlite3

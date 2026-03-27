@@ -6,6 +6,7 @@ import { StatsGrid } from './components/StatsGrid';
 import { JobsTable } from './components/JobsTable';
 import { SourceFilters } from './components/SourceFilters';
 import { ProgressBar } from './components/ProgressBar';
+import { KeywordConfig } from './components/KeywordConfig';
 import { useProgress } from './hooks/useProgress';
 
 /**
@@ -123,6 +124,7 @@ export default function App() {
         {/* SIDEBAR */}
         <div className="lg:col-span-1 space-y-5">
            <ScrapeControls sources={sources} setSources={setSources} isScraping={!!health?.isScraping} />
+           <KeywordConfig />
            <SourceFilters activeTab={activeTab} setActiveTab={setActiveTab} />
         </div>
 

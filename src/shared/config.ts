@@ -73,6 +73,22 @@ export function resetConfig(): void {
   cachedConfig = null;
 }
 
+/** Update keywords at runtime (persists to process.env for this session) */
+export function setKeywords(keywords: string[]): void {
+  if (cachedConfig) {
+    (cachedConfig as unknown as Record<string, unknown>).searchKeywords = keywords;
+  }
+  process.env.SEARCH_KEYWORDS = keywords.join(",");
+}
+
+/** Update location at runtime */
+export function setLocation(location: string): void {
+  if (cachedConfig) {
+    (cachedConfig as unknown as Record<string, unknown>).searchLocation = location;
+  }
+  process.env.SEARCH_LOCATION = location;
+}
+
 function env(key: string): string | undefined {
   return process.env[key];
 }

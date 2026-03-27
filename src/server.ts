@@ -3,6 +3,8 @@ import { startScraper } from "./index.js";
 import { query } from "./db/client.js";
 import { runMultiSourceScrape, getAdapterCapabilities } from "./sources/orchestrator.js";
 import { getConfig, TIME_FILTER_PRESETS } from "./shared/config.js";
+import { getScraperConfig, setScraperKeywords, setScraperLocation } from "./db/config-db.js";
+import { runDeadLetterScan } from "./db/dead-letter.js";
 import { sourceTable, JOBS_ALL_VIEW, ALL_SOURCE_NAMES, CONTENT_INDEX_TABLE } from "./db/schema-router.js";
 import express from "express";
 import cors from "cors";
@@ -104,6 +106,61 @@ app.get("/api/sources", (_req, res) => {
   res.json({ sources, timeFilters: TIME_FILTER_PRESETS });
 });
 
+// ── Config: Keywords & Location (DB-backed, persistent) ─────
+app.get("/api/config/keywords", async (_req, res) => {
+  try {
+    const cfg = await getScraperConfig();
+    res.json({ keywords: cfg.keywords, location: cfg.location });
+  } catch (err) {
+    log.error({ err }, "Failed to get config");
+    res.status(500).json({ error: "Failed to get config" });
+  }
+});
+
+app.put("/api/config/keywords", async (req, res) => {
+  const { keywords, location } = req.body;
+
+  try {
+    if (keywords !== undefined) {
+      if (!Array.isArray(keywords) || keywords.some((k: unknown) => typeof k !== "string" || !k)) {
+        return res.status(400).json({ error: "keywords must be a non-empty array of strings" });
+      }
+      await setScraperKeywords(keywords);
+    }
+
+    if (location !== undefined) {
+      if (typeof location !== "string" || !location) {
+        return res.status(400).json({ error: "location must be a non-empty string" });
+      }
+      await setScraperLocation(location);
+    }
+
+    const cfg = await getScraperConfig();
+    res.json({
+      keywords: cfg.keywords,
+      location: cfg.location,
+      message: "Config saved to database",
+    });
+  } catch (err) {
+    log.error({ err }, "Failed to save config");
+    res.status(500).json({ error: "Failed to save config" });
+  }
+});
+
+// ── Dead Letter Queue: Expired Job Cleanup ────────────────────
+app.post("/api/dead-letter/scan", async (req, res) => {
+  const batchSize = Number(req.body?.batchSize) || 50;
+  const sources = req.body?.sources as string[] | undefined;
+  try {
+    log.info({ batchSize, sources }, "Starting dead letter scan");
+    const result = await runDeadLetterScan(batchSize, sources);
+    res.json(result);
+  } catch (err) {
+    log.error({ err }, "Dead letter scan failed");
+    res.status(500).json({ error: "Dead letter scan failed" });
+  }
+});
+
 // ── SSE Progress Stream ───────────────────────────────────────
 app.get("/api/progress/stream", (req, res) => {
   res.writeHead(200, {
@@ -162,7 +219,6 @@ app.post("/api/trigger/multi", async (req, res) => {
   isScraping = true;
 
   try {
-    const config = getConfig();
     const { sources, timeFilter } = req.body ?? {};
 
     // REV-1: Validate time filter against source capabilities.
@@ -204,33 +260,33 @@ app.post("/api/trigger/multi", async (req, res) => {
     // New logic:
     // - If maxAgeDays is set: run timeSupported with it, run noTimeSupport without
     // - If maxAgeDays is NOT set: run ALL sources together without any time filter
+    // Read keywords/location from DB (persistent config)
+    const scraperCfg = await getScraperConfig();
+    log.info({ keywords: scraperCfg.keywords, location: scraperCfg.location }, "Using DB config for scrape");
+
     if (maxAgeDays) {
-      // Run time-filtered sources with maxAgeDays
       if (timeSupported.length > 0) {
         const result1 = await runMultiSourceScrape(
-          config.searchKeywords,
-          config.searchLocation,
+          scraperCfg.keywords,
+          scraperCfg.location,
           timeSupported,
           maxAgeDays,
         );
         log.info(result1, "Time-filtered sources complete");
       }
-
-      // Run non-time-filtered sources WITHOUT maxAgeDays
       if (noTimeSupport.length > 0) {
         const result2 = await runMultiSourceScrape(
-          config.searchKeywords,
-          config.searchLocation,
+          scraperCfg.keywords,
+          scraperCfg.location,
           noTimeSupport,
           undefined,
         );
         log.info(result2, "Non-time-filtered sources complete");
       }
     } else {
-      // No time filter → full fetch for ALL selected sources in one batch
       const result = await runMultiSourceScrape(
-        config.searchKeywords,
-        config.searchLocation,
+        scraperCfg.keywords,
+        scraperCfg.location,
         requestedSources.length > 0 ? requestedSources : undefined,
         undefined,
       );

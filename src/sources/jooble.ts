@@ -1,20 +1,67 @@
 /**
- * Jooble source adapter — CDP-based.
+ * Jooble source adapter v4 — CF-bypass + strict quality gate.
  *
- * Two-step flow:
- *   1. Get /desc/ links from search page via headless Chrome
- *   2. Scrape each /desc/ page for full job details
+ * Uses cf-bypass-scraper skill (navigateWithCf + CDP persistent context).
+ * ONLY stores jobs that pass quality validation:
+ *   - Title must be a real job title (not CF garbage)
+ *   - JD/snippet must be ≥50 chars of real content
+ *   - No CF challenge text (Just a moment, Checking browser, etc.)
  *
- * No longer depends on Jooble API key. All data comes from the browser.
- * Chrome runs headless in background with separate profile, does NOT
- * interfere with user's daily Chrome.
+ * Strategy:
+ *   1. Search page → extract all job cards via CDP (real Chrome, CF auto-pass)
+ *   2. Top 3 per keyword → scrape /desc/ for full JD
+ *   3. Everything gets strict quality check before returning
  */
 import type { SourceAdapter, FetchOptions } from "./adapter.js";
 import type { NewJob } from "../shared/types.js";
 import { createChildLogger } from "../lib/logger.js";
-import { getJoobleSearchLinks, scrapeJoobleDesc } from "./jooble-browser.js";
+import { scrapeJoobleForKeyword } from "./jooble-browser.js";
 
 const log = createChildLogger({ module: "source-jooble" });
+
+/** Cloudflare garbage patterns — any match = reject */
+const CF_GARBAGE_PATTERNS = [
+  /just a moment/i,
+  /checking your browser/i,
+  /cf-browser-verification/i,
+  /cloudflare/i,
+  /enable javascript/i,
+  /ray id/i,
+  /turnstile/i,
+  /attention required/i,
+  /please wait/i,
+  /security check/i,
+  /verifying you are human/i,
+  /challenge-platform/i,
+];
+
+/** Minimum quality thresholds */
+const MIN_TITLE_LENGTH = 5;
+const MIN_DESCRIPTION_LENGTH = 50;
+
+function isGarbageContent(text: string): boolean {
+  if (!text || text.length < 10) return true;
+  return CF_GARBAGE_PATTERNS.some((pat) => pat.test(text));
+}
+
+function isValidJob(
+  title: string,
+  description: string,
+): { valid: boolean; reason?: string } {
+  if (!title || title.length < MIN_TITLE_LENGTH) {
+    return { valid: false, reason: `title too short (${title?.length ?? 0})` };
+  }
+  if (isGarbageContent(title)) {
+    return { valid: false, reason: "title contains CF garbage" };
+  }
+  if (!description || description.length < MIN_DESCRIPTION_LENGTH) {
+    return { valid: false, reason: `description too short (${description?.length ?? 0})` };
+  }
+  if (isGarbageContent(description)) {
+    return { valid: false, reason: "description contains CF garbage" };
+  }
+  return { valid: true };
+}
 
 export const joobleAdapter: SourceAdapter = {
   name: "jooble",
@@ -24,56 +71,49 @@ export const joobleAdapter: SourceAdapter = {
 
   async fetchJobs(keywords: string[], location: string, _options?: FetchOptions): Promise<NewJob[]> {
     const allJobs: NewJob[] = [];
+    let rejected = 0;
 
     for (const kw of keywords) {
       try {
-        log.info({ keyword: kw, location }, "Fetching Jooble jobs via CDP browser");
+        log.info({ keyword: kw, location }, "Fetching Jooble jobs (CDP persistent context, CF-bypass)");
 
-        // Step 1: Get /desc/ links from search page
-        const links = await getJoobleSearchLinks(kw, location, 15);
-        if (links.length === 0) {
-          log.warn({ keyword: kw }, "No Jooble search results found");
-          continue;
-        }
+        const details = await scrapeJoobleForKeyword(kw, location);
 
-        log.info({ keyword: kw, count: links.length }, "Found Jooble search results");
-
-        // Step 2: Scrape each /desc/ page (with rate limiting)
-        let scraped = 0;
-        for (const link of links) {
-          try {
-            const detail = await scrapeJoobleDesc(link.href);
-            if (!detail) {
-              continue;
-            }
-
-            allJobs.push({
-              companyName: detail.company || "Unknown",
-              jobTitle: detail.title || kw,
-              location: detail.location || location,
-              salaryText: detail.salary || undefined,
-              jdRaw: detail.description,
-              applyUrl: detail.applyUrl || link.href,
-              applyType: "external",
-              source: "jooble",
-              sourceUrl: link.href,
-            });
-
-            scraped++;
-
-            // Rate limit: 2s between page loads to be nice
-            await new Promise(r => setTimeout(r, 2000));
-          } catch (err) {
-            log.warn({ err, url: link.href.slice(0, 80) }, "Failed to scrape Jooble desc page");
+        for (const detail of details) {
+          // ── STRICT QUALITY GATE ──
+          const check = isValidJob(detail.title, detail.description);
+          if (!check.valid) {
+            rejected++;
+            log.debug(
+              { title: detail.title?.slice(0, 30), reason: check.reason },
+              "Rejected garbage job",
+            );
+            continue;
           }
+
+          allJobs.push({
+            companyName: detail.company || "Unknown",
+            jobTitle: detail.title,
+            location: detail.location || location,
+            salaryText: detail.salary || undefined,
+            jdRaw: detail.description,
+            applyUrl: detail.applyUrl || detail.sourceUrl,
+            applyType: "external",
+            source: "jooble",
+            sourceUrl: detail.sourceUrl,
+          });
         }
 
-        log.info({ keyword: kw, scraped, total: links.length }, "Jooble keyword batch complete");
+        log.info({ keyword: kw, accepted: details.length - rejected, rejected }, "Jooble keyword complete");
       } catch (err) {
         log.error({ err, keyword: kw }, "Jooble fetch failed");
       }
     }
 
+    log.info(
+      { totalAccepted: allJobs.length, totalRejected: rejected, keywords: keywords.length },
+      "Jooble adapter complete (quality-gated)",
+    );
     return allJobs;
   },
 };
