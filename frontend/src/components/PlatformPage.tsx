@@ -3,8 +3,10 @@ import { Play, Filter, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { JobsTable } from './JobsTable';
 import { PlatformProgress } from './PlatformProgress';
+import { ProgressBar } from './ProgressBar';
 import { t, type Locale } from '../lib/i18n';
 import { usePolling } from '../hooks/usePolling';
+import { useProgress } from '../hooks/useProgress';
 
 interface SourceCapability {
   name: string;
@@ -52,6 +54,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [scrapeTimeFilter, setScrapeTimeFilter] = useState('r86400');
   const [ingestFilter, setIngestFilter] = useState('');
+  const { progress, connected } = useProgress();
 
   usePolling(async (signal) => {
     try {
@@ -132,8 +135,23 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
     + (applyStats?.byStatus.oauth_google ?? 0)
     + (applyStats?.byStatus.oauth_linkedin ?? 0);
 
+  const scopedProgress = progress && (progress.source === '' || progress.source === source)
+    ? progress
+    : null;
+
   return (
     <div className="space-y-5">
+      {(source === 'jooble' || scopedProgress?.stage !== 'idle') && (
+        <div className="space-y-2">
+          <ProgressBar progress={scopedProgress} />
+          {!connected && (
+            <p className="text-[11px] font-mono text-[var(--color-text-dim)]">
+              Reconnecting to live progress stream...
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         <div className="panel p-4">
           <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('platform.dispatch', locale)}</h3>

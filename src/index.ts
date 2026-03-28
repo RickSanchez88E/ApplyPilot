@@ -149,6 +149,7 @@ export async function startScraper(options?: { force?: boolean; timeFilter?: str
 
   resetProgress();
   updateProgress({
+    source: "linkedin",
     stage: "initializing",
     percent: 0,
     message: "Initializing scrape batch...",

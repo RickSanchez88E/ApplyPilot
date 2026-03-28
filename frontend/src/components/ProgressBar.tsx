@@ -30,7 +30,7 @@ function formatTs(ts: number): string {
 
 export function ProgressBar({ progress }: { progress: ProgressState | null }) {
   const [dismissedTerminalUpdatedAt, setDismissedTerminalUpdatedAt] = useState<number | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const stage = progress?.stage ?? 'idle';

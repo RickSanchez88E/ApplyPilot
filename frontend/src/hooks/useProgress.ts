@@ -7,6 +7,7 @@ export interface ProgressLogEntry {
 }
 
 export interface ProgressState {
+  source: string;
   stage: string;
   current: number;
   total: number;

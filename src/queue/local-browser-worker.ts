@@ -34,6 +34,7 @@ import { resolveApplyUrl } from "../domain/apply-discovery/apply-resolver.js";
 import { upsertApplyDiscovery } from "../repositories/apply-discovery-repository.js";
 import { scrapeJoobleLocal } from "../sources/jooble-local.js";
 import { getSourceConcurrency } from "../browser/source-concurrency.js";
+import { appendLog, incrementStat, resetProgress, updateProgress } from "../lib/progress.js";
 
 const log = createChildLogger({ module: "worker-local-browser" });
 
@@ -44,20 +45,43 @@ const WORKER_CONCURRENCY = Math.max(
 
 async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void> {
   const runId = await createCrawlRun({ taskType: "discover_jobs", source: "jooble" });
+  const keywords = payload.keywords ?? ["software engineer"];
+  const location = payload.location ?? "London, United Kingdom";
+
+  resetProgress();
+  updateProgress({
+    source: "jooble",
+    stage: "initializing",
+    percent: 0,
+    message: "Jooble run queued",
+    keyword: keywords.join(", "),
+  });
+  appendLog("info", "Jooble run started", {
+    source: "jooble",
+    stage: "initializing",
+    percent: 2,
+  });
 
   try {
     await withSourceLease("jooble", "local-browser-worker", async () => {
-      const keywords = payload.keywords ?? ["software engineer"];
-      const location = payload.location ?? "London, United Kingdom";
-
       log.info({
         keywords,
         location,
         hardCap: process.env.JOOBLE_DESC_HARD_CAP ?? "20",
         mode: "local-persistent-browser",
-      }, "Jooble discover — using local persistent Chrome (NOT proxy/CDP pool)");
+      }, "Jooble discover - using local persistent Chrome (NOT proxy/CDP pool)");
+      appendLog("info", `Lease acquired, crawling Jooble (${location})`, {
+        source: "jooble",
+        stage: "scraping_page",
+        percent: 6,
+      });
 
       const jobs = await scrapeJoobleLocal(keywords, location);
+      appendLog("info", `Desc crawl complete: ${jobs.length} candidates`, {
+        source: "jooble",
+        stage: "dedup_insert",
+        percent: 72,
+      });
 
       const { dedupAndInsert } = await import("../ingest/dedup.js");
       let inserted = 0;
@@ -66,6 +90,8 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
         const result = await dedupAndInsert(jobs);
         inserted = result.inserted;
         skipped = result.skipped;
+        incrementStat("jobsInserted", inserted);
+        incrementStat("jobsSkipped", skipped);
       }
 
       await finishCrawlRun(runId, {
@@ -76,6 +102,11 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
       });
 
       log.info({ found: jobs.length, inserted, skipped, mode: "local-persistent-browser" }, "Jooble discover completed");
+      appendLog("success", `Jooble completed: ${inserted} inserted, ${skipped} skipped`, {
+        source: "jooble",
+        stage: "completed",
+        percent: 100,
+      });
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -85,7 +116,7 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
     await recordFailure("jooble", failureType);
 
     if (isCfBlock) {
-      log.warn("Jooble CF block — triggering breaker destroy");
+      log.warn("Jooble CF block - triggering breaker destroy");
       await destroyOnBreaker("jooble", "cf_block");
     }
 
@@ -93,6 +124,11 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
       status: "failed",
       errorType: err instanceof Error ? err.constructor.name : "unknown",
       evidenceSummary: message,
+    });
+    appendLog("error", `Jooble failed: ${message}`, {
+      source: "jooble",
+      stage: "error",
+      percent: 0,
     });
     throw err;
   }
@@ -217,3 +253,4 @@ export function startLocalBrowserWorker(): Worker<CommandPayload> {
 if (process.argv[1]?.includes("local-browser-worker")) {
   startLocalBrowserWorker();
 }
+

@@ -184,6 +184,10 @@ docker compose up -d
 - 已提供自动回滚部署脚本：`scripts/deploy-api-stable.sh`
 - 说明文档：`docs/cicd-docker.md`
 
+### Ubuntu / Linux 部署
+
+项目完全兼容 Ubuntu 22.04 / 24.04 原生运行（含 local-browser-worker）。详细指南见 **[`docs/ubuntu-setup.md`](docs/ubuntu-setup.md)**。
+
 ---
 
 ## 主要 HTTP API

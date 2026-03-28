@@ -16,6 +16,7 @@ import { createChildLogger } from "../lib/logger.js";
 import { createPage, type PageSession } from "../browser/local-browser-manager.js";
 import { recordFailure, type FailureType } from "../browser/circuit-breaker.js";
 import type { NewJob } from "../shared/types.js";
+import { appendLog, incrementStat, updateProgress } from "../lib/progress.js";
 import {
   isExternalEmployerApplyUrl,
   type ScrapeJoobleDescOutcome,
@@ -369,6 +370,11 @@ export async function scrapeJoobleLocal(
 
   log.info({ descConcurrency: JOOBLE_DESC_CONCURRENCY, hardCap: HARD_CAP, maxSearchPages: MAX_SEARCH_PAGES },
     "Jooble config: desc concurrency experiment");
+  appendLog("info", `Jooble config: hardCap=${HARD_CAP}, searchPages=${MAX_SEARCH_PAGES}, descConcurrency=${JOOBLE_DESC_CONCURRENCY}`, {
+    source: "jooble",
+    stage: "initializing",
+    percent: 4,
+  });
 
   for (const keyword of keywords) {
     let session: PageSession | null = null;
@@ -377,6 +383,16 @@ export async function scrapeJoobleLocal(
       const page = session.page;
 
       log.info({ keyword, location, mode: "local-persistent-browser", descConcurrency: JOOBLE_DESC_CONCURRENCY }, "Jooble local discover starting");
+      updateProgress({
+        source: "jooble",
+        stage: "scraping_page",
+        current: 0,
+        total: MAX_SEARCH_PAGES,
+        percent: 10,
+        keyword,
+        message: `[${keyword}] starting search phase`,
+      });
+      appendLog("info", `[${keyword}] search phase started`);
 
       const allCards: SearchCard[] = [];
       const seenUrls = new Set<string>();
@@ -387,11 +403,20 @@ export async function scrapeJoobleLocal(
         const searchUrl = `https://jooble.org/SearchResult?rgns=${encodeURIComponent(location)}&ukw=${encodeURIComponent(keyword)}&p=${pageNum}`;
 
         log.info({ keyword, page: pageNum, cardsCollected: allCards.length }, "Loading search page (local browser)");
+        updateProgress({
+          source: "jooble",
+          stage: "scraping_page",
+          current: pageNum,
+          total: MAX_SEARCH_PAGES,
+          percent: Math.min(36, 10 + pageNum * 12),
+          message: `[${keyword}] loading search page ${pageNum}/${MAX_SEARCH_PAGES}`,
+        });
         await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(3000);
 
         if (await isCfBlocked(page)) {
           log.warn({ keyword, page: pageNum }, "CF blocked search page — aborting entire run");
+          appendLog("warn", `[${keyword}] Cloudflare detected on search page ${pageNum}`);
           consecutiveCfBlocks++;
           if (consecutiveCfBlocks >= JOOBLE_CF_THRESHOLD) {
             throw new Error(`Cloudflare: ${consecutiveCfBlocks} CF block(s) on search pages — threshold=${JOOBLE_CF_THRESHOLD}`);
@@ -409,6 +434,8 @@ export async function scrapeJoobleLocal(
         }
 
         log.info({ keyword, page: pageNum, newCards: cards.length, total: allCards.length }, "Search page extracted");
+        incrementStat("pagesScraped");
+        appendLog("info", `[${keyword}] search page ${pageNum}: +${cards.length} cards, total=${allCards.length}`);
         if (cards.length === 0) break;
         await randomDelay();
       }
@@ -417,6 +444,15 @@ export async function scrapeJoobleLocal(
       const toScrape = allCards.slice(0, HARD_CAP);
       log.info({ keyword, toScrape: toScrape.length, hardCap: HARD_CAP, descConcurrency: JOOBLE_DESC_CONCURRENCY },
         "Scraping desc pages (concurrent pool mode)");
+      updateProgress({
+        source: "jooble",
+        stage: "parsing_details",
+        current: 0,
+        total: toScrape.length,
+        percent: 45,
+        message: `[${keyword}] scraping ${toScrape.length} desc pages`,
+      });
+      appendLog("info", `[${keyword}] desc phase started (${toScrape.length} pages)`);
 
       // Keep the search session alive to prevent browser idle-close.
       // Get context from the search page — desc tasks create their own pages from this context.
@@ -424,11 +460,22 @@ export async function scrapeJoobleLocal(
 
       const descResult = await scrapeDescsConcurrently(context, toScrape, location);
       allJobs.push(...descResult.jobs);
+      incrementStat("jobsParsed", descResult.jobs.length);
+      updateProgress({
+        source: "jooble",
+        stage: "parsing_details",
+        current: toScrape.length,
+        total: toScrape.length,
+        percent: 82,
+        message: `[${keyword}] desc phase done, accepted=${descResult.jobs.length}`,
+      });
+      appendLog("success", `[${keyword}] desc done: accepted=${descResult.jobs.length}, peak=${descResult.peakConcurrent}`);
 
       if (descResult.cfAborted) {
         consecutiveCfBlocks++;
         log.warn({ keyword, jobsBeforeAbort: descResult.jobs.length, peakConcurrent: descResult.peakConcurrent },
           "Desc phase aborted due to CF challenge");
+        appendLog("warn", `[${keyword}] desc aborted by Cloudflare challenge`);
         if (consecutiveCfBlocks >= JOOBLE_CF_THRESHOLD) {
           throw new Error(`Cloudflare: CF challenge during desc phase — aborting run`);
         }
@@ -437,20 +484,26 @@ export async function scrapeJoobleLocal(
       }
 
       log.info({ keyword, accepted: allJobs.length, peakConcurrent: descResult.peakConcurrent }, "Jooble local keyword complete");
+      appendLog("success", `[${keyword}] keyword complete, cumulative accepted=${allJobs.length}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isCf = msg.includes("Cloudflare") || msg.includes("challenge");
       if (isCf) {
+        appendLog("warn", `[${keyword}] Cloudflare stop: ${msg}`);
         const failureType: FailureType = "cf_block";
         await recordFailure("jooble", failureType, { maxFailures: 1, cooldownMs: JOOBLE_BREAKER_COOLDOWN_MS });
         throw err;
       }
       log.error({ keyword, err: msg }, "Jooble local keyword failed");
+      appendLog("error", `[${keyword}] keyword failed: ${msg}`);
     } finally {
       if (session) await session.close();
     }
   }
 
   log.info({ totalJobs: allJobs.length, keywords: keywords.length, mode: "local-persistent-browser", descConcurrency: JOOBLE_DESC_CONCURRENCY }, "Jooble local discover complete");
+  appendLog("success", `Jooble crawl complete: ${allJobs.length} candidates`);
   return allJobs;
 }
+
+

@@ -28,6 +28,11 @@ export interface ProgressLogEntry {
 }
 
 export interface ProgressState {
+  /**
+   * Logical source currently producing this progress stream.
+   * Empty string means "not scoped".
+   */
+  source: string;
   stage: ProgressStage;
   current: number;
   total: number;
@@ -55,6 +60,7 @@ let state: ProgressState = createIdleState();
 
 function createIdleState(): ProgressState {
   return {
+    source: "",
     stage: "idle",
     current: 0,
     total: 0,
