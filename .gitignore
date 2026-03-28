@@ -7,6 +7,7 @@ coverage/
 tmp-chrome-*/
 .cdp-profile/
 .cdp-profiles-proxy/
+.local-browser-data/
 *.db
 *.sqlite
 *.sqlite3

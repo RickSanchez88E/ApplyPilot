@@ -487,10 +487,40 @@ src/
 - [x] 手动 trigger 成功抢占 lease 并 dispatch
 - [x] 所有新 API 端点返回正确数据
 
+### v3.3 本地持久化浏览器返工 (2026-03-28)
+
+#### 修复问题 1: Jooble 真正切到本地浏览器路径
+- [x] 新增 `src/sources/jooble-local.ts`：完全独立的本地浏览器 Jooble 爬取实现
+- [x] 不导入 `navigateWithCf`、`cdp-pool`、`webshare` — 彻底与旧代理路径分离
+- [x] 使用 `createPage("jooble")` 从 `local-browser-manager` 获取页面
+- [x] 内置 slow mode: hard cap（默认 20）+ 随机延迟（5-15s）+ CF 检测 + 熔断
+- [x] `local-browser-worker.ts` 改为导入 `scrapeJoobleLocal`，不再导入 `joobleAdapter`
+
+#### 修复问题 2: Chrome profile 复用方式
+- [x] profile 从 `Default` 改为 `sanchez`
+- [x] 引入 `automationDataDir`（`.local-browser-data/`）作为自动化用独立数据目录
+- [x] 首次启动时自动从真实 Chrome profile 同步 Cookies、Login Data、Local Storage 等登录态
+- [x] 使用 `chromium.launchPersistentContext(automationDataDir, { args: ["--profile-directory=sanchez"] })` 
+- [x] 避免与用户正在运行的 Chrome 实例产生 user data dir 锁冲突
+- [x] 提供 `invalidateProfileSync()` 强制重新同步
+- [x] `.local-browser-data/` 已加入 `.gitignore`
+
+#### 修复问题 3: lease 续租机制
+- [x] `withSourceLease()` 内置 heartbeat（每 60s 调用 `extendLease()`）
+- [x] heartbeat 在 `setInterval` 中运行，任务结束时 `clearInterval` + `releaseLease`
+- [x] 对 Jooble discover 和 resolve_apply 均有效
+- [x] 即使长任务运行 > 15 分钟，lease 也不会过期
+
+#### 验证结果
+- [x] tsc 0 errors
+- [x] 134 tests passed (127 原有 + 7 新增 smoke tests)
+- [x] Chrome 使用 sanchez profile 成功启动（页面创建、导航、关闭、idle close、relaunch）
+- [x] profile 目录在 close/destroy 后保留
+- [x] Docker 4 容器重建并重启
+
 ### 后续待办
-- [ ] 本地 browser worker 实际启动验证（需要宿主机 Chrome profile）
 - [ ] apply discovery 端到端验证（resolve_apply → 跳转链 → 表单检测 → 入库）
-- [ ] Jooble 本地浏览器模式端到端验证
+- [ ] Jooble 本地浏览器模式端到端真实抓取验证
 - [ ] verify_job / enrich_job processor 真实实现
 - [ ] progress.ts 重构为 Redis pub/sub（跨容器 SSE 实时进度）
 - [ ] 存量数据回填 jobs_current

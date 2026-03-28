@@ -1,8 +1,11 @@
 /**
  * Local browser worker — runs on the HOST machine (not in Docker).
  * Uses the local persistent Chrome profile for:
- *   - Jooble discover_jobs (slow mode, concurrency=1)
+ *   - Jooble discover_jobs (slow mode via jooble-local.ts)
  *   - resolve_apply for any source needing real browser + login state
+ *
+ * IMPORTANT: This worker does NOT use the old CDP pool / Webshare proxy path.
+ * Jooble discover goes through scrapeJoobleLocal → local-browser-manager → host Chrome.
  *
  * Entrypoint: `tsx src/queue/local-browser-worker.ts`
  */
@@ -22,13 +25,12 @@ import {
   withSourceLease,
   destroyOnBreaker,
 } from "../browser/local-browser-manager.js";
-import { recordFailure, recordSuccess, type FailureType } from "../browser/circuit-breaker.js";
+import { recordFailure, type FailureType } from "../browser/circuit-breaker.js";
 import { resolveApplyUrl } from "../domain/apply-discovery/apply-resolver.js";
 import { upsertApplyDiscovery } from "../repositories/apply-discovery-repository.js";
+import { scrapeJoobleLocal } from "../sources/jooble-local.js";
 
 const log = createChildLogger({ module: "worker-local-browser" });
-
-// Jooble hard cap config — used by jooble adapter via env var
 
 async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void> {
   const runId = await createCrawlRun({ taskType: "discover_jobs", source: "jooble" });
@@ -38,10 +40,14 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
       const keywords = payload.keywords ?? ["software engineer"];
       const location = payload.location ?? "London, United Kingdom";
 
-      log.info({ keywords, location, hardCap: process.env.JOOBLE_DESC_HARD_CAP ?? "20" }, "Jooble local browser slow-mode discover");
+      log.info({
+        keywords,
+        location,
+        hardCap: process.env.JOOBLE_DESC_HARD_CAP ?? "20",
+        mode: "local-persistent-browser",
+      }, "Jooble discover — using local persistent Chrome (NOT proxy/CDP pool)");
 
-      const { joobleAdapter } = await import("../sources/jooble.js");
-      const jobs = await joobleAdapter.fetchJobs(keywords, location, {});
+      const jobs = await scrapeJoobleLocal(keywords, location);
 
       const { dedupAndInsert } = await import("../ingest/dedup.js");
       let inserted = 0;
@@ -59,8 +65,7 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
         jobsUpdated: skipped,
       });
 
-      log.info({ found: jobs.length, inserted, skipped }, "Jooble discover completed");
-      await recordSuccess("jooble");
+      log.info({ found: jobs.length, inserted, skipped, mode: "local-persistent-browser" }, "Jooble discover completed");
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -70,7 +75,7 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
     await recordFailure("jooble", failureType);
 
     if (isCfBlock) {
-      log.warn("Jooble CF block detected — triggering breaker destroy");
+      log.warn("Jooble CF block — triggering breaker destroy");
       await destroyOnBreaker("jooble", "cf_block");
     }
 
@@ -91,29 +96,31 @@ async function handleResolveApply(payload: ResolveApplyPayload): Promise<void> {
   });
 
   try {
-    const result = await withLocalPage(payload.source, async (page) => {
-      return resolveApplyUrl(page, payload.applyUrl, payload.source);
+    await withSourceLease(payload.source, "local-browser-worker", async () => {
+      const result = await withLocalPage(payload.source, async (page) => {
+        return resolveApplyUrl(page, payload.applyUrl, payload.source);
+      });
+
+      await upsertApplyDiscovery(
+        payload.jobKey,
+        payload.source,
+        result,
+        payload.sourceDescUrl,
+        payload.applyUrl,
+      );
+
+      await finishCrawlRun(runId, {
+        status: "completed",
+        evidenceSummary: `apply_discovery: ${result.status}${result.formProvider ? ` (${result.formProvider})` : ""}`,
+      });
+
+      log.info({
+        jobKey: payload.jobKey,
+        status: result.status,
+        formProvider: result.formProvider,
+        finalFormUrl: result.finalFormUrl,
+      }, "Apply resolution completed");
     });
-
-    await upsertApplyDiscovery(
-      payload.jobKey,
-      payload.source,
-      result,
-      payload.sourceDescUrl,
-      payload.applyUrl,
-    );
-
-    await finishCrawlRun(runId, {
-      status: "completed",
-      evidenceSummary: `apply_discovery: ${result.status}${result.formProvider ? ` (${result.formProvider})` : ""}`,
-    });
-
-    log.info({
-      jobKey: payload.jobKey,
-      status: result.status,
-      formProvider: result.formProvider,
-      finalFormUrl: result.finalFormUrl,
-    }, "Apply resolution completed");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await finishCrawlRun(runId, {
