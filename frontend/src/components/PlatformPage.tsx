@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Play, Filter, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { JobsTable } from './JobsTable';
 import { PlatformProgress } from './PlatformProgress';
 import { t, type Locale } from '../lib/i18n';
+import { usePolling } from '../hooks/usePolling';
 
 interface SourceCapability {
   name: string;
@@ -16,11 +17,17 @@ interface SourceCapability {
 interface ApplyStats {
   total: number;
   byStatus: Record<string, number>;
+  coverage?: {
+    resolvedJobs: number;
+    unresolvedJobs: number;
+    totalJobs: number;
+    resolvedRate: number;
+  };
 }
 
 const ALL_SCRAPE_TIME_OPTIONS = [
-  { value: 'r86400',   label: '24h' },
-  { value: 'r604800',  label: '1 week' },
+  { value: 'r86400', label: '24h' },
+  { value: 'r604800', label: '1 week' },
   { value: 'r2592000', label: '1 month' },
 ];
 
@@ -46,32 +53,30 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
   const [scrapeTimeFilter, setScrapeTimeFilter] = useState('r86400');
   const [ingestFilter, setIngestFilter] = useState('');
 
-  useEffect(() => {
-    fetch('/api/sources')
-      .then(r => r.json())
-      .then((data: { sources: SourceCapability[] }) => {
-        const srcs = Array.isArray(data) ? data : data.sources ?? [];
-        const cap = srcs.find(s => s.name === source);
-        setCapability(cap ?? null);
-      })
-      .catch(() => {});
-  }, [source]);
+  usePolling(async (signal) => {
+    try {
+      const resp = await fetch('/api/sources', { signal });
+      const data: { sources?: SourceCapability[] } | SourceCapability[] = await resp.json();
+      const srcs = Array.isArray(data) ? data : data.sources ?? [];
+      const cap = srcs.find(s => s.name === source);
+      setCapability(cap ?? null);
+    } catch {
+      setCapability(null);
+    }
+  }, 30000, [source]);
 
-  useEffect(() => {
-    const fetchStats = () => {
-      fetch(`/api/jobs/stats?source=${source}`)
-        .then(r => r.json())
-        .then(setStats)
-        .catch(() => {});
-      fetch(`/api/apply-discovery/stats?source=${source}`)
-        .then(r => r.json())
-        .then(setApplyStats)
-        .catch(() => {});
-    };
-    fetchStats();
-    const iv = setInterval(fetchStats, 30000);
-    return () => clearInterval(iv);
-  }, [source]);
+  usePolling(async (signal) => {
+    try {
+      const [statsResp, applyResp] = await Promise.all([
+        fetch(`/api/jobs/stats?source=${source}`, { signal }),
+        fetch(`/api/apply-discovery/stats?source=${source}`, { signal }),
+      ]);
+      setStats(await statsResp.json());
+      setApplyStats(await applyResp.json());
+    } catch {
+      // Keep old snapshot if one round fails.
+    }
+  }, 30000, [source]);
 
   const supportsTime = capability?.supportsNativeTimeFilter ?? false;
   const availableOptions = capability?.supportedTimeOptions ?? [];
@@ -108,7 +113,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
       }
 
       setDispatching(false);
-      setDispatchMsg(`${t('common.queued', locale)} → ${result.queue} (${result.jobId})`);
+      setDispatchMsg(`${t('common.queued', locale)} -> ${result.queue} (${result.jobId})`);
       setTimeout(() => setDispatchMsg(null), 6000);
     } catch (err: unknown) {
       setDispatching(false);
@@ -123,11 +128,13 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
     { label: t('platform.sponsor', locale), value: stats.sponsor_jobs ?? 0 },
   ] : null;
 
+  const loginCount = (applyStats?.byStatus.requires_login ?? 0)
+    + (applyStats?.byStatus.oauth_google ?? 0)
+    + (applyStats?.byStatus.oauth_linkedin ?? 0);
+
   return (
     <div className="space-y-5">
-      {/* Controls + stats row */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Trigger card */}
         <div className="panel p-4">
           <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('platform.dispatch', locale)}</h3>
 
@@ -144,7 +151,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
                     className={`px-2 py-1 rounded text-xs font-mono border transition-all ${
                       scrapeTimeFilter === opt.value
                         ? 'bg-[var(--color-accent)] text-white border-[var(--color-accent)]'
-                        : 'bg-white text-[var(--color-text-secondary)] border-[var(--color-border)] hover:border-[var(--color-accent)]'
+                        : 'bg-[var(--color-panel)] text-[var(--color-text-secondary)] border-[var(--color-border)] hover:border-[var(--color-accent)]'
                     }`}
                   >
                     {opt.label}
@@ -172,7 +179,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
           {errorMsg && errorMsg.includes('cooldown') && (
             <button
               onClick={() => handleTrigger(true)}
-              className="w-full mt-2 flex justify-center items-center gap-1.5 py-1.5 px-3 rounded-lg border border-amber-400 text-amber-600 text-xs font-medium hover:bg-amber-50 transition-all"
+              className="w-full mt-2 flex justify-center items-center gap-1.5 py-1.5 px-3 rounded-lg border border-[var(--color-warning)] text-[var(--color-warning)] text-xs font-medium hover:bg-[var(--color-warning-light)] transition-all"
             >
               <ShieldAlert className="w-3 h-3" />
               {t('platform.forceTrigger', locale)}
@@ -191,7 +198,6 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
           )}
         </div>
 
-        {/* Stats cards */}
         {statItems ? statItems.map((it, i) => (
           <motion.div
             key={it.label}
@@ -212,11 +218,10 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
         )}
       </div>
 
-      {/* Apply Discovery stats (if available) */}
       {applyStats && applyStats.total > 0 && (
         <div className="panel p-4">
           <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('apply.title', locale)}</h3>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
             <div className="text-center">
               <div className="text-lg font-semibold text-[var(--color-success)]">{applyStats.byStatus.final_form_reached ?? 0}</div>
               <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.finalForm', locale)}</div>
@@ -226,7 +231,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
               <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.platformDesc', locale)}</div>
             </div>
             <div className="text-center">
-              <div className="text-lg font-semibold text-amber-600">{(applyStats.byStatus.requires_login ?? 0) + (applyStats.byStatus.oauth_google ?? 0)}</div>
+              <div className="text-lg font-semibold text-[var(--color-warning)]">{loginCount}</div>
               <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.needsLogin', locale)}</div>
             </div>
             <div className="text-center">
@@ -237,16 +242,25 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
               <div className="text-lg font-semibold text-[var(--color-text-dim)]">{applyStats.byStatus.unresolved ?? 0}</div>
               <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.unresolved', locale)}</div>
             </div>
+            {applyStats.coverage && (
+              <div className="text-center">
+                <div className="text-lg font-semibold text-[var(--color-text)]">{applyStats.coverage.resolvedRate.toFixed(1)}%</div>
+                <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('overview.coverage', locale)}</div>
+              </div>
+            )}
           </div>
+          {applyStats.coverage && (
+            <div className="mt-3 text-[11px] font-mono text-[var(--color-text-dim)]">
+              {t('overview.unresolvedJobs', locale)}: <span className="text-[var(--color-warning)]">{applyStats.coverage.unresolvedJobs}</span> / {applyStats.coverage.totalJobs}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Progress / recent runs */}
       <PlatformProgress source={source} locale={locale} />
 
-      {/* Ingest filter + Jobs table */}
       <div>
-        <div className="flex items-center gap-1.5 mb-3">
+        <div className="flex items-center gap-1.5 mb-3 flex-wrap">
           <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-dim)] font-mono">{t('platform.ingested', locale)}</span>
           {INGEST_FILTER_OPTIONS.map(opt => (
             <button
@@ -260,7 +274,7 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
             </button>
           ))}
         </div>
-        <JobsTable activeTab={source} ingestFilter={ingestFilter} />
+        <JobsTable key={`${source}:${ingestFilter || 'all'}`} activeTab={source} ingestFilter={ingestFilter} locale={locale} />
       </div>
     </div>
   );

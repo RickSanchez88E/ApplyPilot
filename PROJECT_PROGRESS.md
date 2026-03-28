@@ -1,528 +1,322 @@
-# 项目进度 (PROJECT_PROGRESS.md)
+# PROJECT_PROGRESS.md
 
-## 当前阶段: Multi-Source v2.3 — 时间精度 + Freshness 修复
+## 当前状态
+- 当前阶段：v3.2，平台化 dashboard + 队列化抓取 + 本地浏览器/容器混合执行
+- 当前运行模式：
+  - Docker 基础服务：`postgres`、`redis`、`api`、`scheduler`、`worker-general`、`worker-browser`
+  - 宿主机进程：`local-browser-worker`
+- 前端形态：
+  - 顶部平台导航：Overview / LinkedIn / Reed / Jooble / DevITJobs / HN Hiring / RemoteOK
+  - 平台页独立 trigger、stats、jobs、runs、apply discovery
+  - 中英文切换已可用
 
-### v2.3 变更 (2026-03-26)
-- [x] **Fix 1: 时间精度感知渲染**
-  - API `/api/jobs` 新增 `posted_date_precision` 计算列（'day' | 'datetime'）
-  - 基于午夜整点检测 (HH:MM:SS = 00:00:00 → 'day')
-  - 前端 `formatAgo()` 按精度渲染：day → "Today"/"Yesterday"/"Mar 26"，datetime → "10 days ago"
-  - 解决 Reed (269 条) / LinkedIn (88 条) 的"虚假 19 hours ago"问题
-- [x] **Fix 2: Freshness 审计字段**
-  - API `/api/jobs` 新增 `freshness_gap_seconds` 计算列（`created_at - posted_date` 的秒数差）
-  - 用于审计"入库时间 vs 发布时间"的偏差
-- [x] **Fix 3: 前端 React 迁移（由用户完成）**
-  - 旧 vanilla JS 前端已删除（app.js, dom.js, controls.js 等）
-  - 新前端：`frontend/` Vite + React + TailwindCSS v4
-  - Vite build 输出到 `public/` 供 Express 静态服务
-- [x] **Fix 4: Mixed-source trigger 逻辑修复**
-  - Bug: 当 timeFilter 没传时，timeSupported 组的源（Reed, Jooble）被完全跳过
-  - Fix: 无 maxAgeDays 时所有源统一走一次 full-fetch；有 maxAgeDays 时分组执行
-  - 确保 Reed + HN 混选时两者都执行
-- [x] **Adapter 能力声明（由用户完成）**
-  - `SourceAdapter` 新增 `supportsNativeTimeFilter` 和 `minTimeGranularityHours`
-  - Orchestrator 使用声明替代硬编码集合 `SOURCES_WITH_NATIVE_TIME_FILTER`
-  - `/api/sources` 暴露能力元数据供前端消费
-- [x] **DevITJobs adapter 重写（由用户完成）**
-  - 旧 `/api/jobSearch` 返回 HTML → 新 `/api/jobsLight` 返回 JSON
-  - 本地缓存 + 客户端关键词/地点/远程过滤
-- [x] **HN Hiring 修复（由用户完成）**
-  - 使用 `search_by_date` 替代 `search` 避免返回旧帖子
-  - 从 comment.time 提取 postedDate → 使 post-filter 生效
-  - 去掉 Reed/Jooble 不可靠的 postedDate（非真实发布时间）
-- [x] 克隆并本地部署
-- [x] 修复本地数据库端口冲突 (5433)
-- [x] 引入并阅读 `AGENTS.md` 规范
-- [x] 阶段 1: 核心框架与前端 MVP 开发
-- [x] 阶段 2: 接入 API 友好的 ATS (Greenhouse, Lever 等)
-- [x] 阶段 3: 接入高防反爬 ATS (Workday, Taleo, SuccessFactors, iCIMS)
-- [x] **v2.0: 多数据源 Multi-Source 引擎**
-  - [x] 5 个 API 源适配器 + GOV.UK Sponsor 名单
-  - [x] 跨平台去重 content_hash
-  - [x] 前端数据源分组展示
-- [x] **v2.1: Schema 分离 + 交互式 Dashboard**
-  - [x] DB Migration 004: 6 个独立 Schema (src_linkedin, src_devitjobs, src_reed, src_jooble, src_hn_hiring, src_remoteok)
-  - [x] Schema Router (`schema-router.ts`): 按源路由查询到对应 Schema
-  - [x] `public.jobs_all` VIEW: UNION ALL 全源数据
-  - [x] `public.content_index` 表: 跨平台关联索引
-  - [x] LinkedIn 多时间段爬取: 默认先爬 1h → 再爬 24h (最新优先)
-  - [x] 前端交互优化:
-    - [x] 时间筛选按钮 (1h / 6h / 24h / 1w / 1m) — 控制 LinkedIn 爬取范围
-    - [x] 24h Activity 柱状图 (纯 CSS 可视化)
-    - [x] 时间范围下拉 (Last 1h / 6h / 24h / 1w / 1m / All)
-    - [x] 排序方式下拉 (最新爬取 / 最新发布 / 公司 A-Z)
-    - [x] Source Tabs 可交互筛选
-    - [x] 相对时间显示 ("3m ago", "22h ago")
-    - [x] Source 彩色进度条 (sidebar)
-    - [x] 列标题可点击排序
-    - [x] Row 渐入动画
-  - [x] server.ts 增强:
-    - [x] `/api/sources` — 获取可用数据源元数据
-    - [x] `/api/jobs?source=X&sortBy=posted_date&timeRange=1h` — 多维筛选
-    - [x] `/api/jobs/stats?source=X` — 按源统计 + hourlyActivity 数据
-    - [x] `/api/jobs/duplicates` — 跨平台重复岗位列表
-    - [x] `/api/trigger` body 支持 `{ timeFilter: "r3600" }`
+## 已锁定决策
+- 主技术栈：Node.js + TypeScript
+- 数据库真相源：PostgreSQL
+- 队列：Redis + BullMQ
+- API 触发模式：dispatch-only，不再同步执行抓取
+- Docker 基础服务常驻；本地浏览器执行器运行在宿主机
+- Jooble 默认策略：本地持久化浏览器慢速模式（低并发、限速、hard cap、熔断）
+- 自动化 profile：`sanchez`
+- apply discovery 只做到最终表单页发现与结构提取，不做自动 submit
+- 平台调度按 source 独立配置
+- APPLY_BACKFILL_LIMIT 语义锁定：**scheduler 每个 backfill tick 的全局 dispatch 上限**（非单平台上限）
+- 登录态分层重试锁定：`requires_login/requires_registration/oauth_*` 不再永久排除；仅在 `APPLY_LOGIN_READY_SOURCES` 标记可用时重试，否则进入 login-pending 池
 
-## 数据库架构 (Schema Separation)
+## 本地浏览器策略
+- 引擎能力：`LOCAL_BROWSER_ENGINE=chrome|edge`
+- profile 策略定案：automation clone（非 live attach）
+  - source profile：`<USER_DATA_DIR>/<PROFILE_DIRECTORY>`
+  - automation clone：`LOCAL_BROWSER_DATA_DIR/<PROFILE_DIRECTORY>`
+  - `syncTtlMs` / `resyncBeforeLaunch` 控制 clone 刷新
+- forceResync 定案：**defer 模式**（活跃时挂起，关闭后执行）
+- breaker 定案：按 failureType 分层（严重→立即 cooldown，瞬时→增量计数）
 
-```
-PostgreSQL: job_orchestrator (port 5433)
-├── src_linkedin.jobs     ← LinkedIn 爬虫数据
-├── src_devitjobs.jobs    ← DevITJobs.uk API
-├── src_reed.jobs         ← Reed API
-├── src_jooble.jobs       ← Jooble API
-├── src_hn_hiring.jobs    ← HN Who is Hiring
-├── src_remoteok.jobs     ← RemoteOK JSON Feed
-├── public.content_index  ← 跨平台 content_hash 关联
-└── public.jobs_all       ← UNION ALL VIEW (统一查询)
-```
+## 当前架构
+- 前端：`frontend/` React + Vite + Tailwind，产物输出到 `public/`
+- API：Express，对外提供 jobs、stats、sources、trigger、schedule、apply discovery 等端点
+- 执行层：
+  - `scheduler`：按 source 调度 dispatch + apply backfill 轮转分发
+  - `worker-general`：轻任务
+  - `worker-browser`：容器内浏览器任务
+  - `local-browser-worker`：宿主机本地浏览器任务（所有 resolve_apply + jooble discover）
+- 数据层：
+  - source schema + `public.jobs_all`
+  - `jobs_current` / `job_snapshots` / `crawl_runs` / `source_cursors`
+  - `source_schedule_state` / `apply_discovery_results`
 
-## LinkedIn 时间筛选策略
-| 策略 | 时间代码 | 说明 |
-|------|----------|------|
-| **默认 (multi-pass)** | r3600 → r86400 | 先获取 1h 内最新岗位 → 再获取 24h 完整数据 |
-| 前端可选 | r3600 / r21600 / r86400 / r604800 / r2592000 | 1h / 6h / 24h / 1w / 1m |
-| 排序 | sortBy: "DD" | 始终按发布时间降序 (最新优先) |
+## Apply Discovery 验收状态
 
-## Webshare 代理策略
-| 层级 | 目标平台 | 代理 |
-|------|----------|------|
-| LinkedIn | LinkedIn Guest API | ❌ Cookie 直连 |
-| API Sources | DevITJobs, Reed, HN, RemoteOK | ❌ API 直连 |
-| Jooble /desc/ | Jooble 详情页外链解析 | ✅ Webshare 住宅代理 (最小带宽) |
-| Phase 2 ATS | Greenhouse, Lever, Ashby 等 | ❌ 公开页面 |
-| Phase 3 ATS | Workday, iCIMS, Taleo | ✅ Webshare + Camoufox |
+### 阈值定义（Phase 1）
+- 全局阈值：discovered/total >= 30%，final_form/total >= 10%
+- 平台阈值：discovered/source >= 20%，final_form/source >= 5%
 
-### Jooble Webshare 集成 (2026-03-27)
-- **搜索页**：本地 CDP Chrome（不消耗代理流量）
-- **/desc/ 页**：Webshare 住宅代理 + 最小带宽（`JOOBLE_DESC_MINIMAL_BANDWIDTH=1`）
-  - 拦截 images/CSS/fonts/media（`attachMinimalBandwidthRoutes`）
-  - 仅运行 `JOOBLE_APPLY_ONLY_SCRIPT`（不拉 JD/公司/薪资长文本）
-  - `omitHtml: true`（不传整页 HTML 到 Node）
-- **代理选择**：
-  - 通过 `proxy_list_download_token` 获取正确的 `host:port:user:pass` 格式
-  - 住宅代理端口 80（不是 API list 返回的 10000）
-  - 自动尝试 5 个代理槽（`rgzrbzwz-N`），跳过不可达的
-  - Tunnel failure 检测：连续 2 次隧道失败立即停止，节省带宽
-  - CF 连续封锁 3 次也停止
-- **结果**：18 岗位中 10 个获得真实外链（ev.careers, greenhouse.io, gd.com 等）
+### 最新统计快照（2026-03-28 18:18 UTC）
+**统一口径来源：`npx tsx scripts/apply-stats.ts --json`**
 
----
+| 指标 | 值 | 阈值 | 结果 |
+|------|-----|------|------|
+| total_jobs | 2367 | — | — |
+| discovered_total | 717 | 30% (≥710) | ✅ PASS (30.3%) |
+| final_form_total | 125 | 10% (≥237) | ❌ FAIL (5.3%) |
 
-## v2.2: 架构治理 + Skills 安装 + 规则强化 (2026-03-25)
+### 按平台矩阵
 
-### 目录结构评估与决策
-- [x] 完成全仓审计（结构、职责边界、前后端耦合度）
-- [x] **决定不做 monorepo 拆分** — 当前项目是单 package Express + 纯静态 HTML，强行拆成 `apps/web` + `apps/api` + `packages/shared` 属于 AGENTS.md 禁止的"无收益过度拆分"
-- [x] 采用"原地分层 + 文档明确边界"策略
+| source | total | disc | final | desc | login | block | disc% | final% | disc阈值 | final阈值 |
+|--------|-------|------|-------|------|-------|-------|-------|--------|---------|----------|
+| devitjobs | 77 | 58 | 14 | 38 | 2 | 4 | 75.3% | 18.2% | ✅ | ✅ |
+| hn_hiring | 157 | 58 | 58 | 0 | 0 | 0 | 36.9% | 36.9% | ✅ | ✅ |
+| jooble | 1401 | 237 | 49 | 152 | 31 | 5 | 16.9% | 3.5% | ❌ | ❌ |
+| linkedin | 346 | 186 | 4 | 47 | 53 | 82 | 53.8% | 1.2% | ✅ | ❌ |
+| reed | 366 | 158 | 0 | 1 | 156 | 1 | 43.2% | 0.0% | ✅ | ❌ |
+| remoteok | 20 | 20 | 0 | 0 | 20 | 0 | 100% | 0.0% | ✅ | ❌ |
 
-### 后端逻辑分层 ✅ (2026-03-25)
-- [x] **`src/shared/`** — 跨模块共享（config.ts, types.ts, errors.ts）
-- [x] **`src/lib/`** — 基础设施（logger.ts, progress.ts, utils.ts）
-- [x] **`src/ingest/`** — 数据采集引擎（linkedin-scraper.ts, job-parser.ts, dedup.ts, session-manager.ts, ats-scraper.ts, stealth-browser.ts, linkedin-job-detail.ts）
-- [x] **`src/db/`** — 数据库层（client.ts, migrate.ts, schema-router.ts, migrations/）
-- [x] **`src/sources/`** — 多源适配器（adapter.ts, orchestrator.ts, devitjobs.ts, reed.ts, jooble.ts, hn-hiring.ts, remoteok.ts, govuk-sponsor.ts）
-- [x] **`src/server.ts`** — Express 装配入口（仅做路由注册与中间件挂载）
-- [x] **`src/index.ts`** — LinkedIn CLI 入口
-- [x] 所有 import 路径更新（28 个文件，含测试）
-- [x] `tsc --noEmit` 零错误
-- [x] 所有 API 端点验证通过（/api/status, /api/sources, /api/jobs, /api/jobs/stats, /api/jobs/duplicates, /api/trigger）
+### 双目标分组验收
+| 组别 | sources | total | discovered | final_form | discovered% | final_form% | 结论 |
+|------|---------|-------|------------|------------|-------------|-------------|------|
+| 可解组 | hn_hiring, devitjobs, jooble | 1635 | 353 | 121 | 21.6% | 7.4% | discovered 达标，final_form 未达 10% |
+| 需登录组 | linkedin, reed, remoteok | 732 | 364 | 4 | 49.7% | 0.5% | 需登录重试机制已打通；final_form 仍依赖稳定登录态 |
 
-### 前端 ES 模块化 ✅ (2026-03-25)
-- [x] `public/app.js` 从 290 行单文件拆分为 ES module 组织：
-  - `lib/constants.js` — 源元数据 + 颜色 token
-  - `lib/utils.js` — 时间格式、DOM 辅助
-  - `lib/dom.js` — DOM 引用注册表
-  - `features/jobs/jobs.js` — Jobs 表渲染 + 数据获取
-  - `features/sources/sources.js` — Source tabs + 数据源分布
-  - `features/analytics/analytics.js` — 统计汇总
-  - `features/analytics/chart.js` — 24h 活动图表
-  - `features/progress/progress.js` — SSE 进度流 + 状态徽章
-  - `features/controls/controls.js` — 触发 / 调度 / 筛选事件
-- [x] `app.js` 简化为 ~55 行薄编排器（import + state + init）
-- [x] `index.html` 更新为 `<script type="module">`
-- [x] 浏览器零控制台错误验证通过
-- [x] Dashboard 全功能正常（stats / chart / table / tabs / trigger / SSE）
+### 数据一致性
+- `jobs_current.apply_resolution_status` vs `apply_discovery_results.apply_discovery_status`：**0 mismatches**
 
-### Agent Skills 安装
-- [x] `.agents/skills/` 统一路径（6 个技能完整安装）：
-  - `no-ai-dashboard-ui` — 压制 AI 生成感
-  - `jobs-dashboard-patterns` — dashboard 页面模式
-  - `dense-data-table` — 数据表高密度规范
-  - `source-filters-and-analytics` — 控制区 + 分析区规范
-  - `db-schema-viz-patterns` — 数据结构可视化规范
-  - `safe-page-refactor-review` — 安全页面重构审查
+### 总体结论
+- **"全量最终表单页化" Phase 1 目标：❌ 未达成**
+- 全局 discovered 已达标（30.4%），但 final_form 仅 5.3%（差 4.7%）
+- 3 个平台达标：devitjobs ✅ hn_hiring ✅（以上两个 Phase 1 全部 PASS）
+- 4 个平台未达 final_form 阈值：jooble / linkedin / reed / remoteok
 
-### AGENTS.md 规则强化
-- [x] 根目录 AGENTS.md 已包含完整规则体系
+### 阻塞原因分析
 
-### 当前目录结构
-```
-.
-├── AGENTS.md                 ← 全局规则（已完善）
-├── PROJECT_PROGRESS.md       ← 项目进度
-├── .agents/skills/           ← 6 个项目级技能
-├── public/                   ← 前端（纯静态 ES Modules）
-│   ├── AGENTS.md             ← 前端规范
-│   ├── index.html            ← 页面结构
-│   ├── index.css             ← 样式 + design tokens
-│   ├── app.js                ← 薄编排器入口 (~55 lines)
-│   ├── lib/                  ← 共享前端基础设施
-│   │   ├── constants.js      ← 源元数据 + 颜色
-│   │   ├── utils.js          ← 时间格式等
-│   │   └── dom.js            ← DOM 引用注册
-│   └── features/             ← 功能模块
-│       ├── jobs/             ← 表格渲染 + 数据
-│       ├── sources/          ← Source tabs + breakdown
-│       ├── analytics/        ← 统计 + 图表
-│       ├── progress/         ← SSE 进度流
-│       └── controls/         ← 触发 / 调度 / 筛选
-├── src/                      ← 后端（分层 TypeScript）
-│   ├── server.ts             ← Express 装配入口
-│   ├── index.ts              ← LinkedIn CLI 入口
-│   ├── shared/               ← 跨层共享
-│   │   ├── config.ts
-│   │   ├── types.ts
-│   │   └── errors.ts
-│   ├── lib/                  ← 基础设施
-│   │   ├── logger.ts
-│   │   ├── progress.ts
-│   │   └── utils.ts
-│   ├── ingest/               ← 数据采集引擎
-│   │   ├── linkedin-scraper.ts
-│   │   ├── job-parser.ts
-│   │   ├── linkedin-job-detail.ts
-│   │   ├── dedup.ts
-│   │   ├── session-manager.ts
-│   │   ├── ats-scraper.ts
-│   │   └── stealth-browser.ts
-│   ├── db/                   ← 数据库层
-│   │   ├── client.ts
-│   │   ├── migrate.ts
-│   │   ├── schema-router.ts
-│   │   └── migrations/
-│   ├── sources/              ← 多源适配器
-│   │   ├── adapter.ts
-│   │   ├── orchestrator.ts
-│   │   ├── devitjobs.ts / reed.ts / jooble.ts / hn-hiring.ts / remoteok.ts
-│   │   └── govuk-sponsor.ts
-│   └── __tests__/
-├── scripts/                  ← 一次性 / 维护脚本
-├── docker-compose.yml
-├── Dockerfile
-└── package.json
+| 平台 | 阻塞原因 | 占比 | 可执行对策 |
+|------|---------|------|----------|
+| reed | 全部 apply URL → requires_login（登录墙站全站） | 156/158 = 99% | 需要 reed 登录态或已授权 cookie 才能突破 |
+| remoteok | 全部 → requires_login | 20/20 = 100% | 远程聚合站登录墙，与 reed 同类问题 |
+| linkedin | 53 requires_login + 82 blocked | 135/186 = 73% | 需要 LinkedIn 登录态 + 反爬虫策略 |
+| jooble | 152 platform_desc_only（落回 jooble.org 页面） | 152/237 = 64% | jooble apply URL 大多指向自身描述页，需提取外链或直接跳转 |
+
+### 分层 backfill / scheduler 新语义（已落地）
+- `scripts/backfill-apply-layered.ts` 与 `src/domain/apply-discovery/dispatch.ts`：
+  - 移除 login/oauth/per-registration 永久排除逻辑
+  - 新增 login-gated policy：
+    - `APPLY_LOGIN_REQUIRED_SOURCES=linkedin,reed,remoteok`
+    - `APPLY_LOGIN_READY_SOURCES=<comma-list>`
+  - 登录态未就绪时进入 `login-pending` 计数池，不丢候选
+- `src/scheduler/index.ts`：
+  - backfill 仅轮转 `enabledSources`
+  - `APPLY_BACKFILL_LIMIT` 为每个 tick 全局上限
+  - `APPLY_BACKFILL_SOURCE_LIMITS` 做分平台上限（默认：`jooble:3,linkedin:4,reed:1,remoteok:1,hn_hiring:8,devitjobs:8`）
+  - 新增 `crawl_runs` crash-recovery 定时收口（`recoverStaleRunningCrawlRuns`）
+
+### 下一轮待执行批次
+
+```bash
+# jooble — 扩大 discovered 覆盖，需突破 platform_desc_only
+npx tsx scripts/backfill-apply-layered.ts --source=jooble --batch=100 --rounds=3
+
+# linkedin — 剩余 ~155 未 discovered
+npx tsx scripts/backfill-apply-layered.ts --source=linkedin --batch=100 --rounds=2
+
+# reed — 需要先解决登录态，否则 backfill 只会继续产出 requires_login
+# 前置条件：reed cookie / 登录授权
+
+# remoteok — 同上，需登录态
 ```
 
-### Skill-Driven UI 重构 ✅ (2026-03-26)
-按 6 个 skills 驱动的前端视觉与信息架构重构：
-- [x] **`no-ai-dashboard-ui`** — 全局 token 重置：去渐变/glow/shimmer/pill/彩色 KPI/pulse 动画
-- [x] **`jobs-dashboard-patterns`** — stats 行紧凑化、card title 去 emoji 改 uppercase、首屏密度提升
-- [x] **`dense-data-table`** — td padding 压缩、去 staggered animation、source badge 方角中性色
-- [x] **`source-filters-and-analytics`** — tabs→segmented control、time-btn 去 glow、chart 灰化、sidebar bars 中性
-- [x] **`safe-page-refactor-review`** — 最终 review 验收文档输出
-- [x] `db-schema-viz-patterns` — 确认本轮不涉及（无 schema 页面）
+## 未完成 / 阻塞项
+- `verify_job` / `enrich_job` / `refresh_source_cursor` 真实 processor 未完成
+- progress 仍缺 Redis pub/sub 跨容器实时链路
+- **apply discovery final_form 覆盖仍远低于 10% 目标**
+  - 根因：reed/remoteok/linkedin 的 apply URL 全部或大部分指向登录墙
+  - jooble 的 apply URL 大多指向自身平台页，非外部 ATS
+  - 仅 hn_hiring (36.9%) 和 devitjobs (18.2%) 能稳定达到 ATS 最终表单
+- worker 异常退出时可能残留 `running` 状态的 crawl_runs
 
-改动文件：`index.css`（全量重写）、`index.html`（结构调整）、`features/jobs/jobs.js`、`features/sources/sources.js`、`features/analytics/chart.js`
+## 当前风险
+- Jooble / 浏览器链路成本高，仍需观察带宽和 challenge 触发
+- automation clone 不是 live attach，登录态更新依赖同步策略
+- local-browser-worker 运行在宿主机，运维比纯 Docker 多一步
+- **reed / remoteok 登录墙是结构性阻塞**：不是 backfill 轮数能解的，需要登录态介入
+- **linkedin blocked 率高**：82/186 = 44% 被反爬拦截
+- **jooble platform_desc_only 率高**：152/237 = 64% 落回平台页
+- backfill 队列堆积时，worker 逐条处理（concurrency=1）吞吐低
+- 本地浏览器近期存在启动失败：
+  - Chrome: `Opening in existing browser session`
+  - Edge: `crashpad settings version is not 7`
+  - 影响：backfill 实跑可 dispatch，但消费侧大面积 failed，导致统计增量有限
 
-### Webshare 并行探测（2026-03-27）
-- [x] `listWebshareBrowserProxies(n)`（`src/lib/webshare.ts`）从 API 拉取多条代理（默认先试 `backbone` 再 `direct`）
-- [x] `yarn probe:webshare-parallel` / `scripts/webshare-parallel-jooble-desc.ts`：1 本机 + 3 Webshare 代理上下文，**4 并发** worker 跑 **5 个 URL**（独立 Playwright `browser.newContext({ proxy })`，不占主 CDP 池）
-- [x] `yarn probe:webshare-cf` / `scripts/webshare-cf-concurrency-probe.ts`：仅 Webshare 上下文，阶梯并发（默认 1→12）测 Jooble 是否出现 CF 标题/HTML 启发式；**单次实测可到 12 并发仍未触发 CF**（以当时 IP/线路为准）
+## 验证基线
+- TypeScript：`npx tsc --noEmit` 通过
+- Vitest：134 tests / 17 files 全部通过
+- **apply discovery 统一口径**：`npx tsx scripts/apply-stats.ts`
+  - 此脚本的输出是上面所有数字的唯一来源
+  - 不允许用其他 SQL 或接口产出数字与此脚本矛盾
+- 本地浏览器专项验证：
+  - `scripts/verify-gaps.ts` 覆盖 defer resync、Edge 启动、lease+scheduler 互斥、breaker 分层语义
+- 分层 backfill 验证：
+  - `scripts/backfill-apply-layered.ts` 在 2026-03-28 17:34–17:44 期间跑过多轮
+  - discovered: 128 → 717 (+589)
+  - final_form: 49 → 125 (+76)
+  - 数据一致性：0 mismatches
+- 2026-03-28 18:17–18:20 新增验证：
+  - 分层重试证据：
+    - `remoteok`（无登录态）=> `20 candidates → 0 dispatched, 20 login-pending`
+    - `APPLY_LOGIN_READY_SOURCES=remoteok` => `20 candidates → 20 dispatched, 0 login-pending`
+  - scheduler 语义证据：
+    - `ENABLED_SOURCES=hn_hiring,jooble` 时，其他 source 明确 `Source not enabled — skipping schedule`
+    - 日志输出 `globalLimitPerTick=12` + sourceCaps，且 tick 结果按全局限额扣减
+  - crash-recovery 证据：
+    - `npx tsx scripts/verify-crash-recovery.ts`：`recovered=2`，样本 run 状态由 `running` 收口到 `failed`
+  - 失败诊断矩阵：
+    - `npx tsx scripts/diagnose-apply-failures.ts --json` 产出各平台 root-cause + evidence + action + expectedBenefit
 
-### Jooble：雇主申请外链 + 过期页（2026-03-27）
-- [x] `/desc/` 页不再把 Jooble URL 当作 `apply_url`：从 DOM 中对外链打分选取雇主/ATS 链接（含 `utm_source=jooble` 等）
-- [x] `source_url` 固定为 canonical Jooble `/desc/...`；`apply_url` 仅在有合法外链时写入
-- [x] 每条职位（可配置上限）拉取 `/desc/` 解析 apply；下架文案（如 “The job position is no longer available”）跳过入库
-- [x] 死信扫描补充 Jooble 常见下架英文句式；Jooble 行 **优先探测 `source_url`（/desc/）** 再探测 `apply_url`（下架文案在 Jooble 页，不在雇主站）
-- [x] 说明：死信 **仅** 在调用 `POST /api/dead-letter/scan` 时执行，无内置定时任务
-- [x] **Jooble 存量外链回填**：`yarn backfill:jooble-apply`（`scripts/backfill-jooble-apply-urls.ts`）对 `apply_url` 为空或仍为 Jooble 域名的行按 `source_url` 重开 `/desc/` 解析雇主 `apply_url`（默认每批 30 条，可 `--limit=` / `--dry-run`）；与线上一致使用 **`withCdpTab` + `scrapeJoobleDescOnPage` 单标签串行**（cf-bypass-scraper：持久会话、降低并行挑战）
+## 下一个 Agent 接手须知
+1. 开始前先读：
+   - `AGENTS.md`
+   - `PROJECT_PROGRESS.md`
+   - `frontend/AGENTS.md`
+   - `.agents/skills/*/SKILL.md`
+2. 需要上下文摘要时先跑：
+   - `npx tsx scripts/agent-harness.ts --format markdown`
+3. 不要误动这些锁定点：
+   - Node/TS 主栈、PostgreSQL 真相源、BullMQ+Redis
+   - Jooble 默认本地浏览器策略
+   - automation clone（非 live attach）
+   - forceResync defer 生命周期
+   - breaker 分层语义
+   - apply discovery 不做 submit
+4. apply discovery 数字统一用 `npx tsx scripts/apply-stats.ts` 产生
+5. 当前最值得优先收口的是：
+   - reed / remoteok 登录态解决（解锁 ~385 个 requires_login 候选）
+   - jooble platform_desc_only 外链提取改进
+   - linkedin 反爬拦截率降低
 
-### Jooble /desc/ 省带宽（2026-03-27）
-- [x] `minimalBandwidth` + `attachMinimalBandwidthRoutes`：拦截 image / stylesheet / font / media；`loadPageWithCfResolution` 支持 **`omitHtml`**（不调用 `page.content()` 把整页 HTML 拉回 Node）
-- [x] 环境变量 **`JOOBLE_DESC_MINIMAL_BANDWIDTH=1`** 时批量走省流量路径；页面内用 **`JOOBLE_APPLY_ONLY_SCRIPT`** 只取 apply 相关 DOM
-- [x] **`yarn jooble:minimal-apply -- "https://jooble.org/desc/..."`**（`scripts/jooble-minimal-apply-url.ts`）单条 URL 测雇主 `applyUrl`；**不是**「只发一个 HTTP 请求」——主文档与站点所需 JS 仍会计入代理带宽
-- [x] `.env.example`：Webshare key 占位；注释 `JOOBLE_DESC_MINIMAL_BANDWIDTH` / `CF_PROBE_MINIMAL_BANDWIDTH`
+## 最近更新（2026-03-28，前端审计落地）
+- 前端数据语义对齐：`/api/apply-discovery/stats` 返回新增 `coverage` 字段（`resolvedJobs` / `unresolvedJobs` / `totalJobs` / `resolvedRate`），来源为 `public.jobs_current`，用于显示“解析覆盖率”和“未解析岗位”。
+- 前端轮询策略升级：新增 `frontend/src/hooks/usePolling.ts`，统一替换页面内 `setInterval` 轮询，支持页面隐藏时暂停、恢复时立即拉取、并发请求中止。
+- 平台/总览 apply 统计口径修正：登录相关统一为 `requires_login + oauth_google + oauth_linkedin`。
+- 表格与可访问性改造：
+  - `JobsTable` 增加移动端列降级展示与分页按钮 `aria-label`。
+  - `KeywordConfig` 全量接入 i18n 并补齐 icon-only 按钮可读标签。
+  - 顶部导航支持窄屏横向滚动并补 `aria-current`。
+- 主题一致性：补充 `--color-warning-light` token，去除关键流程中的硬编码 warning 色。
+- 设计上下文持久化：新增 `.impeccable.md` 并同步 `AGENTS.md` 的 `Design Context`，锁定“克制/专业/可靠、Light only、运营同学优先”的前端方向。
+- 验证结果（2026-03-28）：
+  - `cd frontend && npm run lint` 通过（0 error / 0 warning）
+  - `cd frontend && npm run build` 通过
+  - `npm run typecheck` 通过
 
-### Per-Proxy Persistent Context + /away/ 外链提取（2026-03-27）
-- [x] **`yarn jooble:webshare-apply`**（`scripts/jooble-webshare-apply-scraper.ts`）：每个 Webshare proxy **独立 `launchPersistentContext`**（cf-bypass-scraper 模式，独立 `--user-data-dir`，`channel: "chrome"`），三阶段 warmup（首页 → 搜索 → /desc/）建立 `cf_clearance`
-- [x] **关键发现 1**：Jooble `/desc/` 裸 URL（无 `sid`/`ckey`/`elckey` query 参数）会被 CF/WAF 拦截；**必须带完整 session 参数**才能通过
-- [x] **关键发现 2**：Jooble "Apply" 按钮是 `<a href="/away/{id}?...">`，通过 JS 重定向到雇主 ATS；DOM 层面无直接外链。需打开 `/away/` 新 tab → 等 URL 跳出 `jooble.org` → 拿到雇主 URL
-- [x] 提取函数 `extractApplyOnlyFromLoadedPage` 已导出，供外部脚本直接调用（不通过 `page.goto()`）
-- [x] `isCfBlocked` 从 `cdp-pool.ts` 导出
-- [x] `.cdp-profiles-proxy/` 加入 `.gitignore`
-- [x] 实测：`direct` persistent context → `https://ev.careers/jobs/311576244-software-engineer?utm_source=jooble` ✓
+## 最近更新（2026-03-28，Docker CI/CD 稳定发布）
+- 新增 GitHub Actions 流水线：`.github/workflows/docker-cicd.yml`
+  - PR / main push 自动执行：typecheck、test、frontend lint/build、Docker API 镜像构建烟测。
+  - main 分支在配置部署 secrets 后自动 SSH 到目标主机执行部署。
+- 新增稳定部署脚本：`scripts/deploy-api-stable.sh`
+  - 发布前先拉起 `job-api-candidate`（不占用线上端口）并做健康检查。
+  - 健康通过后才切换 `job-api`；新容器失败则自动回滚到备份容器。
+  - 适配“已有前端实例在跑”的在线发布场景，减少中断窗口。
+- 新增文档：`docs/cicd-docker.md`
+  - 说明 secrets 配置、发布流程、回滚逻辑和手动演练命令。
 
-### Docker 前端集成（2026-03-27）
-- [x] **Dockerfile 多阶段构建**：3 个 stage（frontend-builder → backend-builder → runner）
-  - Stage 1: `node:22-alpine` + npm ci → `vite build` → 输出到 `/app/public/`
-  - Stage 2: `node:22-alpine` + pnpm → `tsc` → 输出到 `/app/dist/`
-  - Stage 3: `node:22-bookworm-slim` + Playwright Chromium（Jooble browser adapter 依赖）
-- [x] **pnpm-lock.yaml 同步**：补齐 `playwright-extra`、`puppeteer-extra-plugin-stealth` 两个新增依赖
-- [x] **.dockerignore 更新**：排除 `node_modules`、`.cdp-profile*`、`.agents`、`tmp` 等
-- [x] **HEALTHCHECK 改为 Node fetch**：替代 Alpine wget（Debian slim 无 wget）
-- [x] 构建验证通过：`docker compose build app` → `docker compose up app -d` → 健康检查 healthy
-- [x] 前端 + API 同容器运行：`http://localhost:3000`（前端 HTML）+ `/api/status`（API）
-- [x] 本地 Vite dev server 已停止
+## 最近更新（2026-03-28，P0 浏览器生命周期稳定性改造）
 
-### Progress Bar 卡住修复（2026-03-27）
-- [x] **Bug**: dispatch 完成后 `isScraping=false`（health poll 显示 "Scrape complete"），但 SSE progress 卡在 `scraping_page`
-- [x] **Root cause**: `server.ts` 的 `catch` 块只设 `isScraping=false`，不更新 progress → SSE 永远不推送 "completed"/"error"
-- [x] **Fix 1**: 三个 trigger 入口（LinkedIn / multi / scheduled）开始时调 `resetProgress()` 清旧状态
-- [x] **Fix 2**: `catch` 块追加 `updateProgress({ stage: "error", message })` 确保前端收到错误态
-- [x] **Fix 3**: `ProgressBar.tsx` 增加 8 秒 auto-dismiss（completed/error 后自动隐藏）
+### 问题
+- 批量 `resolve_apply` 时浏览器疯狂开标签页，内存飙升 40GB+，Chrome/Edge 卡死无响应
+- 根因：`createPage` 无全局并发上限，无 per-source 限制，页面未在 finally 中确保关闭
 
-### 后续待办（UI）
-- [ ] 表格排序方向指示器（`▲/▼` 替代 `↕`）
-- [ ] Start/Stop 按钮颜色进一步克制
-- [ ] 移动端 responsive 验证
-
----
-
-## v3.0: 抓取域重构 — 岗位状态机 + 过期判定 + 命令队列 + 多容器隔离
-
-### 架构决策（已定案，2026-03-27）
-
-- 保留 Node.js / TypeScript 主栈，不引入 Python/Celery
-- PostgreSQL 唯一真相源，Redis + BullMQ 队列
-- 不设计投递/申请/表单执行层
-- 短期保留 `src_*` schema 兼容层，中期以 `jobs_current` 为岗位真相表
-
-### 目标容器划分
-
-| 容器 | 职责 | 基础镜像 |
-|------|------|---------|
-| postgres | 唯一数据源 | postgres:16-alpine |
-| redis | BullMQ 队列 + progress pub/sub | redis:7-alpine |
-| api | Express API + 前端静态 + 入队（不跑抓取） | node:22-alpine |
-| scheduler | cron 定时创建命令（不写业务表） | node:22-alpine |
-| worker-general | 轻任务：discover(API源)/verify/dedup/snapshot/expiry | node:22-alpine |
-| worker-browser | 重任务：LinkedIn CDP/Jooble CF-bypass/浏览器 verify | node:22-bookworm-slim + Chrome |
-
-### 核心新增表
-
-- `jobs_current` — 岗位标准化真相（job_key UNIQUE, job_status 枚举）
-- `job_snapshots` — 内容变化才写
-- `crawl_runs` — 每次命令执行记录（task_type, source, evidence_summary 等）
-- `source_cursors` — 分页游标与进度跟踪
-
-### 岗位可用性状态
-
-```
-active → suspected_expired → expired
-active → blocked (CF/authwall/proxy)
-active → fetch_failed (网络错误，可重试)
-suspected_expired → active (恢复)
-blocked → active (解封后)
-```
-
-### 命令队列
-
-| 命令 | 路由 |
+### 新增模块
+| 文件 | 职责 |
 |------|------|
-| discover_jobs | browser(LinkedIn/Jooble) / general(其他) |
-| verify_job | browser(需浏览器) / general(HTTP) |
-| enrich_job | browser(Jooble /desc/) / general |
-| recheck_expiry | general（调度 verify 子命令） |
-| refresh_source_cursor | general |
+| `src/browser/page-lifecycle.ts` | **PageLifecycleTracker** — semaphore 全局/per-source 并发上限、page 开/关/leak 追踪、内存采样 |
+| `src/browser/resource-guardian.ts` | **ResourceGuardian** — 后台健康监控，内存超阈值时 force-release slot + 自动重启浏览器 |
+| `src/browser/source-concurrency.ts` | Per-source 并发策略配置（jooble 保守 / hn_hiring 高吞吐），支持 env override |
 
-### 过期判定（独立模块，不再 DELETE）
+### 关键改动
+- `local-browser-manager.ts` 完全重写：
+  - `createPage()` 先 `acquireSlot()` 获取 semaphore，失败则阻塞/超时
+  - 返回 `PageSession { page, close() }` — close 在 finally 中释放 slot
+  - `closeBrowser()` 调用 `forceReleaseAll()` 清理残留 slot
+  - 首次启动浏览器时自动启动 `ResourceGuardian`
+  - Chrome 启动参数加入 `--no-restore-state`、`--renderer-process-limit=4` 防止 tab 累积
+  - 启动后立即关闭 `about:blank` / `chrome://newtab/` 等默认页
+- `local-browser-worker.ts` 更新：
+  - 每个 task 完成/失败后输出 lifecycle stats（openPages、leakedPages、RSS）
+  - 使用 per-source `navigationTimeoutMs` 覆盖默认超时
 
-| 平台 | 策略要点 |
-|------|---------|
-| Reed | 404/410 → expired；timeout → fetch_failed |
-| Jooble | CF 页面 → blocked（不是 expired）；"no longer available" → expired |
-| LinkedIn | authwall → blocked；404 非 authwall → expired |
-| Generic (HN/RemoteOK/DevITJobs) | 单次 missing → suspected；连续 ≥3 → expired |
+### 已锁定的新决策
+- **并发上限**：`MAX_OPEN_PAGES=3`（全局）、`MAX_OPEN_PAGES_PER_SOURCE=2`（per-source）
+- **内存阈值**：`MEMORY_THRESHOLD_BYTES=2GB`（告警）、`GUARDIAN_DESTROY_THRESHOLD_BYTES=3GB`（强制重启）
+- **Source 策略**：jooble/linkedin/reed/remoteok = maxPages=1 保守；hn_hiring/devitjobs = maxPages=3 高吞吐
+- **资源守护主阈值**：仅统计 automation 浏览器 root PID 进程树 RSS——不再全机扫描 chrome/msedge
+- **Waiter 状态机**：waiter state: pending | resolved | rejected_timeout | rejected_force，所有转移通过 tryResolve/tryReject 互斥函数
 
-### 模块目录
+### P0 返工修复记录
 
-```
-src/
-├── api/           ← HTTP 路由 + DTO（从 server.ts 提取）
-├── queue/         ← 命令定义 + worker 注册 + processors
-├── domain/
-│   ├── job-lifecycle/  ← 状态机 + 迁移规则
-│   ├── expiry/         ← 判定器 + 4 平台策略
-│   └── dedup/          ← job_key + content_hash + snapshot policy
-├── repositories/  ← jobs_current / snapshots / crawl_runs / cursors
-├── workflows/     ← discover → verify → snapshot → recheck 编排
-├── sources/       ← adapter 不变 + linkedin/ 从 ingest/ 迁入
-├── scheduler/     ← node-cron 入口
-├── lib/           ← + redis.ts, progress.ts 改 Redis pub/sub
-├── shared/        ← 不变
-└── db/            ← + 005_job_lifecycle_tables.sql
-```
+#### 第一轮（2026-03-28 19:35 UTC）
 
-### Phase 1: 数据模型 + 状态语义 ✅ (2026-03-27)
-- [x] `005_job_lifecycle_tables.sql`: jobs_current, job_snapshots, crawl_runs, source_cursors
-- [x] `src/domain/dedup/job-key.ts` + `content-hash.ts` + `snapshot-policy.ts`
-- [x] `src/domain/job-lifecycle/job-status.ts` + `transitions.ts`
-- [x] `src/repositories/jobs-repository.ts` + `snapshot-repository.ts` + `crawl-run-repository.ts`
-- [x] 修改 `dedup.ts::dedupAndInsert` 双写 `jobs_current`
-- [x] **TDD**: 40/40 passed — job-key / content-hash / snapshot-policy / transitions
-- [ ] 存量数据回填脚本（Phase 1b，可后续执行）
+| 编号 | 问题 | 修复概要 |
+|------|------|----------|
+| P0-1 | phantom slot（waiter 引用比较失败） | 引入 waiterId + settled 标志 |
+| P0-2 | guardian 仅看 Node RSS | 增加浏览器进程族观测（tasklist/pgrep） |
+| P0-3 | 验收脚本假通过 | 新增 phantom slot 回归、waiter 清理 check |
 
-### Phase 2: 过期判定模块 ✅ (2026-03-27)
-- [x] `src/domain/expiry/types.ts` + `expiry-judge.ts` + `evidence-collector.ts`
-- [x] 4 个平台策略: `reed-strategy` / `jooble-strategy` / `linkedin-strategy` / `generic-feed-strategy`
-- [x] **TDD**: 26/26 passed — 4 strategy classify + ExpiryJudge routing
-- [ ] `src/workflows/recheck-workflow.ts`（Phase 2b，需接入 worker processor）
-- [ ] 重构 `dead-letter.ts` → 不再 DELETE，改状态迁移（Phase 2b）
+#### 第二轮（2026-03-28 19:56 UTC）— 最新
 
-### Phase 3: 引入队列和 worker ✅ (2026-03-27)
-- [x] `pnpm add bullmq ioredis` + `src/lib/redis.ts`
-- [x] `src/queue/commands.ts` + `setup.ts` (dispatch helper + routing)
-- [x] `src/queue/general-worker.ts` + `browser-worker.ts` (placeholder processors)
-- [x] `src/scheduler/index.ts` (interval-based dispatch)
-- [x] **TDD**: 10/10 passed — command routing + queue names
-- [ ] 接入真实 adapter 到 processor（Phase 3b）
-- [ ] 重构 `progress.ts` → Redis pub/sub（Phase 3b）
-- [ ] 重构 `server.ts` → trigger 改为入队（Phase 3b）
+第一轮仍存在三个缺陷，本轮全部修复：
 
-### Phase 4: Docker 拆容器 ✅ (2026-03-27)
-- [x] `Dockerfile.api` (node:22-alpine, no browser)
-- [x] `Dockerfile.worker` (node:22-alpine, general + scheduler)
-- [x] `Dockerfile.browser` (node:22-bookworm-slim + Chrome)
-- [x] `docker-compose.yml` — 6 容器 (postgres / redis / api / scheduler / worker-general / worker-browser)
-- [x] `docker compose config` 验证通过
-- [ ] **SDD**: 实际 build + 冷启动验证（需 Docker daemon 运行）
+| 编号 | 问题 | 根因 | 修复方法 |
+|------|------|------|----------|
+| P0-1A | forceReleaseAll 不 reject pending waiter | 先 settled=true 再 filter(!settled) → toReject 永空 | waiter 改为显式状态机；forceReleaseAll 直接遍历调 tryReject |
+| P0-1B | waiter 三路径靠注释保证互斥 | settled 布尔无法表达终态原因 | state 枚举（pending/resolved/rejected_timeout/rejected_force） |
+| P0-2 | guardian 全机扫描 chrome/msedge 误算 | 按进程名无差别统计 | setAutomationBrowserPid 注册 root PID → wmic 只统计该树 RSS |
+| P0-3 | guardian 验收只检查函数存在 | override 可调用 ≠ 行为正确 | 升级为行为级断言 |
 
-### 验收修复轮 (2026-03-28)
-- [x] **P0-1**: upsertJob previousHash 修复为 CTE 先读旧值（snapshot 判定现在基于真实旧 hash）
-- [x] **P0-2**: discover_jobs / recheck_expiry worker 接通真实 adapter + expiry judge
-- [x] **P0-2**: 未实现命令 (verify_job / enrich_job / refresh_source_cursor) 改为 throw Error（fail fast）
-- [x] **P0-3**: server.ts trigger/multi 改为 dispatch-only（不再同步执行抓取）
-- [x] **P0-4**: dead-letter DELETE 路径已完全断开，API 改为 `/api/jobs/recheck-expiry` dispatch 新路径
-- [x] **P1-1**: transitionStatus 返回 `{ updated: boolean }`，from 不匹配时不再静默
-- [x] **P1-2**: scheduler dispatchExpiryChecks 真实实现（查询 suspected_expired / stale active / cooled blocked）
-- [x] **P1-3**: Docker compose 资源限制改为 mem_limit/cpus（普通 compose 直接生效）
+#### 第三轮（2026-03-28 20:21 UTC）
 
-### 缺陷修复轮 #2 (2026-03-28)
-- [x] **缺陷 1**: timeFilter 映射修复 — `resolveMaxAgeDays()` 将 `r86400`/`r604800`/`r2592000` 正确映射为 1/7/30 天，不再 `Number("r86400")` → NaN
-- [x] **缺陷 2**: 前端 trigger 流适配 — 移除 `isScraping` 依赖和完成轮询，改为 dispatch 后立即反馈入队数量
-- [x] **缺陷 3**: recheck_expiry crawl_run 状态准确性 — `updated=false` 时记为 `cancelled` 而非 `completed`，区分 no_change / 迁移成功 / 迁移期望但未生效
+| 编号 | 问题 | 根因 | 修复方法 |
+|------|------|------|----------|
+| P0-F1 | automation PID 注册链未真实验收 | Playwright persistent context 不暴露 browser().process() | 改用 CDP SystemInfo.getProcessInfo 拿真实 browser PID；封装 resolveAutomationBrowserPid()（async）；验收脚本真实 launch → PID → guardian mode |
+| P0-F2 | Windows 进程树 RSS 只扫两层，依赖 wmic | wmic 已废弃，不能递归 | 改用 PowerShell Get-CimInstance Win32_Process 一次获取全部进程，内存中构建 pid→children 图递归遍历，无层数限制 |
+| P0-F3 | guardian 降级静默，PID 拿不到时无报告 | 返回 0 就完了 | 显式枚举 tracking_active/tracking_unavailable/no_browser/test_override；getGuardianTrackingState() 公开 API；markBrowserLaunchedPidUnavailable() 区分“无浏览器”和“浏览器已启但拿不到 PID” |
 
-### v3.1 前端平台化 + Docker 部署 (2026-03-28)
-- [x] **前端重构为平台化 tabs**: 顶部 navbar 7 个 tab (Overview / LinkedIn / Reed / Jooble / DevITJobs / HN Hiring / RemoteOK)
-- [x] **每平台独立面板**: 独立 trigger、stats、jobs table、progress/crawl runs
-- [x] **Overview 总览页**: KPI 汇总 + source 分布 + duplicates + latest run per source
-- [x] **Progress 按平台分离**: 每个平台页显示自己的 crawl_runs 历史，Overview 显示各平台最近一次 run
-- [x] **新增 API 端点**: `GET /api/crawl-runs/latest?source=X`, `POST /api/trigger/source/:source`
-- [x] **BullMQ 队列名修复**: `worker:general` → `worker-general` (BullMQ v5 禁止 `:`)
-- [x] **旧容器清理 + 6 容器部署**: postgres, redis, api, scheduler, worker-general, worker-browser 全部运行
-- [x] **Worker 集成验证通过**: 
-  - Reed dispatch → worker-general → crawl_runs completed (400 found, 79 inserted)
-  - LinkedIn dispatch → worker-browser → crawl_runs completed (2 inserted)
-  - Scheduler 自动 dispatch 6 sources → 全部执行
-  - 1048 总 jobs 跨 6 sources
-- [x] 移除旧 SourceFilters sidebar, ScrapeControls 多选模式
-- [x] 126 tests pass, tsc 0 errors
+#### 第四轮（2026-03-28 20:41 UTC）— 最新（真实 manager 生产路径闭环验收）
 
-### v3.2 本地持久化浏览器 + 平台级调度 + Apply Discovery (2026-03-28)
+| 编号 | 问题 | 根因 | 修复方法 |
+|------|------|------|----------|
+| P0-L1 | PID 注册验收绕开生产路径 | 脚本手动 chromium.launch + setAutomationBrowserPid 冒充 | 新增 ensureBrowserForTest() 走真实 launchBrowser()；验收全程不手动 setAutomationBrowserPid |
+| P0-L2 | context.on("close") 没有清理 guardian 状态 | 崩溃/外部关闭时 PID/flag 残留 | context.on("close") 增加 setAutomationBrowserPid(null) + clearBrowserLaunchedFlag() |
+| P0-L3 | getGuardianTrackingState().automationBrowserTreeRssBytes 恒为 0 | 硬编码占位 | 引入 _lastMeasuredBrowserRssBytes 缓存；tick 写、state 读 |
+| bonus | closeDefaultPages 关闭全部 about:blank 导致 context 退出 | 所有页面关闭 = 进程退出 | 保留至少一个页面 |
 
-#### A. 本地持久化浏览器执行层
-- [x] `src/browser/local-browser-manager.ts`: Chrome 持久化 profile 管理（启动/page 生命周期/idle timeout/熔断销毁）
-- [x] `src/browser/circuit-breaker.ts`: Redis-backed 熔断器（连续失败 ≥3 次 → cooldown 30min，可配置）
-- [x] 生命周期：page 每任务创建/关闭，browser idle 5min 自动关闭，熔断时销毁进程但保留 profile
-- [x] 支持 Jooble、LinkedIn、apply discovery 的 Google OAuth 链路
+### 验证结果（第四轮 2026-03-28 20:41 UTC，文档收口 21:05 UTC）
+- TypeScript：`npx tsc --noEmit` 通过
+- Vitest：134 tests / 17 files 全部通过（无回归）
+- P0 lifecycle 专项验证：`npx tsx scripts/verify-page-lifecycle.ts` — **66 passed, 0 failed**
+  - `phantom_slot_check: PASS`
+  - `waiter_cleanup_check: PASS`
+  - `force_release_rejects_pending_waiters: PASS`
+  - `timeout_waiter_cannot_be_woken_later: PASS`
+  - `guardian_over_threshold_trips_cleanup: PASS`
+  - `guardian_ignores_non_automation_browser: PASS`
+  - `automation_pid_registration_check: PASS` — 真实 manager 生产路径注册，PID = 97768
+  - `guardian_tracking_mode_check: PASS` — mode = tracking_active
+  - `guardian_cleanup_pid_clear_check: PASS` — closeBrowser() 后 mode=no_browser, pid=null
+  - `guardian_state_rss_cached_check: PASS` — tick 后 cached RSS = 355MB（缓存值，非实时测量）
 
-#### B. 平台级调度层
-- [x] Scheduler 完全重写为 per-source 独立间隔：
-  - linkedin: 20min / reed: 30min / remoteok: 60min / devitjobs: 2h / hn_hiring: 6h / jooble: 4h
-- [x] `src/scheduler/source-lease.ts`: Redis-backed source 运行锁
-- [x] Scheduler dispatch 前检查: lease / cooldown / breaker 状态
-- [x] 手动触发自动抢占 lease，scheduler 对该 source 暂停
-- [x] `source_schedule_state` 表持久化调度状态
+### 验收边界说明
 
-#### C. Apply Discovery / Final Form Resolution
-- [x] `src/domain/apply-discovery/types.ts`: 11 种 apply 状态建模
-- [x] `src/domain/apply-discovery/apply-resolver.ts`: 跳转链跟踪 + 表单检测 + ATS 识别 + OAuth/登录页检测
-- [x] `src/repositories/apply-discovery-repository.ts`: upsert + stats + recent 查询
-- [x] DB migration 006: `apply_discovery_results` 表 + `source_schedule_state` 表
+#### 已完成且可写 PASS 的
+- P0 生命周期治理主链（waiter 状态机、forceRelease 语义、phantom slot 防止）
+- guardian PID/state 链（tracking mode 显式枚举、缓存 RSS、mode transition）
+- manager 真实启动/关闭链（隔离临时目录下，ensureBrowserForTest → launchBrowser → CDP PID 注册 → closeBrowser）
+- context.on("close") 清理一致性（与 closeBrowser 语义对齐）
+- closeDefaultPages 安全性（保留至少一个页面）
 
-#### D. 数据模型
-- [x] `apply_discovery_results`: 独立表 (job_key UNIQUE)，11 种状态枚举
-- [x] 字段: redirect_chain jsonb, form_schema_snapshot jsonb, form_provider, oauth_provider 等
-- [x] `source_schedule_state`: 每 source 调度间隔 / 上次/下次 dispatch / lease / cooldown
+#### 代码修复已完成但仍属于运行环境验证项的
+- 真实 sanchez profile clone/sync 场景的环境稳定性（验收脚本用隔离目录，不覆盖 syncProfileState 真实链路）
+- 用户本机真实 Chrome profile 与 Playwright 启动兼容性（exitCode=21 场景已确认存在，但属于 profile 状态依赖，非代码逻辑缺陷）
+- 真实浏览器带用户 profile 的长期运行稳定性（需生产负载观测）
 
-#### E. 前端 i18n + 平台视图增强
-- [x] `frontend/src/lib/i18n.ts`: 60+ 翻译词条，支持 zh/en 切换
-- [x] Navbar 右上角语言切换按钮
-- [x] OverviewPage: 新增 apply discovery 统计卡片（form reached / desc only / login required / blocked）
-- [x] PlatformPage: 新增 apply discovery 区域 + cooldown/busy 错误处理 + force trigger 按钮
-- [x] PlatformProgress: i18n 状态文本
-
-#### F. Jooble 成本控制
-- [x] Jooble discover_jobs 路由到 `worker-local-browser` 队列（concurrency=1）
-- [x] 本地持久化浏览器慢速模式（非代理高并发）
-- [x] 熔断器：CF block / tunnel failure / timeout → 3 次触发 cooldown
-- [x] 环境变量可配置：hard cap / 页面间延迟 / 熔断阈值
-
-#### G. Docker / 启动
-- [x] 5 容器继续自启（postgres, redis, api, scheduler, worker-general）
-- [x] worker-browser 容器（LinkedIn CDP）
-- [x] local-browser-worker 作为宿主机进程（`npx tsx src/queue/local-browser-worker.ts`）
-- [x] docker-compose.yml 注释说明 local-browser-worker 不在容器内
-
-#### H. 新增 API 端点
-- [x] `GET /api/schedule/state` — 每 source 调度状态
-- [x] `GET /api/breaker/:source` — 熔断器状态
-- [x] `POST /api/breaker/:source/reset` — 强制重置熔断
-- [x] `GET /api/apply-discovery/stats?source=X` — apply 解析统计
-- [x] `GET /api/apply-discovery/recent?source=X` — 最近 apply 解析结果
-- [x] `POST /api/apply-discovery/resolve` — 手动触发 apply 解析
-- [x] `POST /api/lease/:source/release` — 手动释放 source lease
-- [x] `POST /api/trigger/source/:source` — 增加 lease 抢占 + cooldown 检查 + force 参数
-
-#### I. Queue 命令扩展
-- [x] 新增 `resolve_apply` 命令类型
-- [x] 新增 `worker-local-browser` 队列
-- [x] Jooble discover 路由从 `worker-browser` 改为 `worker-local-browser`
-
-#### J. 验证结果
-- [x] tsc 0 errors（前后端）
-- [x] 127 tests passed (vitest)
-- [x] 6 容器全部 Up + healthy
-- [x] Scheduler 自动 dispatch 6 sources，per-source 间隔正确
-- [x] 手动 trigger 成功抢占 lease 并 dispatch
-- [x] 所有新 API 端点返回正确数据
-
-### v3.3 本地持久化浏览器返工 (2026-03-28)
-
-#### 修复问题 1: Jooble 真正切到本地浏览器路径
-- [x] 新增 `src/sources/jooble-local.ts`：完全独立的本地浏览器 Jooble 爬取实现
-- [x] 不导入 `navigateWithCf`、`cdp-pool`、`webshare` — 彻底与旧代理路径分离
-- [x] 使用 `createPage("jooble")` 从 `local-browser-manager` 获取页面
-- [x] 内置 slow mode: hard cap（默认 20）+ 随机延迟（5-15s）+ CF 检测 + 熔断
-- [x] `local-browser-worker.ts` 改为导入 `scrapeJoobleLocal`，不再导入 `joobleAdapter`
-
-#### 修复问题 2: Chrome profile 复用方式
-- [x] profile 从 `Default` 改为 `sanchez`
-- [x] 引入 `automationDataDir`（`.local-browser-data/`）作为自动化用独立数据目录
-- [x] 首次启动时自动从真实 Chrome profile 同步 Cookies、Login Data、Local Storage 等登录态
-- [x] 使用 `chromium.launchPersistentContext(automationDataDir, { args: ["--profile-directory=sanchez"] })` 
-- [x] 避免与用户正在运行的 Chrome 实例产生 user data dir 锁冲突
-- [x] 提供 `invalidateProfileSync()` 强制重新同步
-- [x] `.local-browser-data/` 已加入 `.gitignore`
-
-#### 修复问题 3: lease 续租机制
-- [x] `withSourceLease()` 内置 heartbeat（每 60s 调用 `extendLease()`）
-- [x] heartbeat 在 `setInterval` 中运行，任务结束时 `clearInterval` + `releaseLease`
-- [x] 对 Jooble discover 和 resolve_apply 均有效
-- [x] 即使长任务运行 > 15 分钟，lease 也不会过期
-
-#### 验证结果
-- [x] tsc 0 errors
-- [x] 134 tests passed (127 原有 + 7 新增 smoke tests)
-- [x] Chrome 使用 sanchez profile 成功启动（页面创建、导航、关闭、idle close、relaunch）
-- [x] profile 目录在 close/destroy 后保留
-- [x] Docker 4 容器重建并重启
-
-### 后续待办
-- [ ] apply discovery 端到端验证（resolve_apply → 跳转链 → 表单检测 → 入库）
-- [ ] Jooble 本地浏览器模式端到端真实抓取验证
-- [ ] verify_job / enrich_job processor 真实实现
-- [ ] progress.ts 重构为 Redis pub/sub（跨容器 SSE 实时进度）
-- [ ] 存量数据回填 jobs_current
-- [ ] 前端 e2e 测试
-
+### 字段语义说明
+- `GuardianTrackingState.automationBrowserTreeRssBytes` 是上一次 `_guardianTick()` 的缓存测量值，不是实时读数
+- 浏览器关闭后该值可能保留最后一次测量；判断浏览器是否存活必须看 `mode` 和 `automationBrowserPid`
+- `ensureBrowserForTest()` 是有副作用的真实生产链启动入口，不是只读 helper；调用后必须配对 `closeBrowser()`

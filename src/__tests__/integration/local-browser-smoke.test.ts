@@ -21,7 +21,8 @@ describe("local-browser config defaults", () => {
     const cfg = getLocalBrowserConfig();
     expect(cfg.profileDirectory).toBe("sanchez");
     expect(cfg.userDataDir).toContain("User Data");
-    expect(cfg.chromeExecutablePath).toContain("chrome.exe");
+    expect(["chrome", "edge"]).toContain(cfg.engine);
+    expect(cfg.executablePath).toMatch(/\.exe$/i);
   });
 
   it("launchPersistentContext uses automationDataDir root and --profile-directory arg", () => {
@@ -71,10 +72,19 @@ describe("withSourceLease heartbeat", () => {
       new URL("../../browser/local-browser-manager.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
       "utf-8",
     );
-    expect(source).toContain("HEARTBEAT_INTERVAL_MS");
+    expect(source).toContain("heartbeatIntervalMs");
     expect(source).toContain("extendLease");
     expect(source).toContain("setInterval");
-    expect(source).toContain("clearInterval(heartbeat)");
+    // Heartbeat cleanup uses stopHeartbeat(source) which calls clearInterval on the
+    // registered heartbeat from the activeHeartbeats Map (cross-scope safe for breaker destroy)
+    expect(source).toContain("stopHeartbeat(source)");
+    // clone strategy + stratified breaker semantics
+    expect(source).toContain("automation-profile-clone");
+    expect(source).toContain("forceOpenBreaker");
+    expect(source).toContain("recordFailure");
+    expect(source).toContain("SEVERE_BREAKER_FAILURES");
+    expect(source).toContain("syncTtlMs");
+    expect(source).toContain("scheduleDeferredProfileResync");
   });
 
   it("resolve_apply handler in local-browser-worker uses withSourceLease", () => {

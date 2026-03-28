@@ -113,9 +113,23 @@ WEBSHARE_API_KEY=
 
 # 可选：启用数据源列表（逗号分隔）
 # ENABLED_SOURCES=linkedin,devitjobs,reed,jooble,hn_hiring,remoteok
+
+# Apply backfill: 每个 scheduler tick 的全局上限（非单平台）
+APPLY_BACKFILL_LIMIT=30
+# 分平台上限（source:limit,source:limit）
+APPLY_BACKFILL_SOURCE_LIMITS=jooble:3,linkedin:4,reed:1,remoteok:1,hn_hiring:8,devitjobs:8
+# 需要登录平台 + 当前登录态可用平台
+APPLY_LOGIN_REQUIRED_SOURCES=linkedin,reed,remoteok
+APPLY_LOGIN_READY_SOURCES=
 ```
 
 > 若 `.env.example` 与代码不一致，以 **`src/shared/config.ts`** 为准。
+
+### Apply Backfill 调度语义（锁定）
+
+- `APPLY_BACKFILL_LIMIT` 语义已锁定为：**scheduler 每个 backfill tick 的全局 dispatch 上限**。
+- 单平台吞吐由 `APPLY_BACKFILL_SOURCE_LIMITS` 控制；scheduler 会在 `enabledSources` 内轮转，禁止调度禁用平台。
+- 登录相关状态（`requires_login` / `requires_registration` / `oauth_*`）不再永久排除：仅当 `APPLY_LOGIN_READY_SOURCES` 标记该平台可用时重试，否则进入登录态待处理池（login pending）。
 
 ### 3. 数据库迁移
 
@@ -163,6 +177,12 @@ docker compose up -d
 
 - Postgres：`localhost:5433` → 容器内 `5432`，库名 `job_orchestrator`。  
 - 应用服务在 compose 内通过内网连接 `postgres:5432`；若在**宿主机**同时运行 `yarn dev:server`，请使用带 **5433** 的 `DATABASE_URL`。
+
+### Docker CI/CD（稳定发布）
+
+- 已提供 GitHub Actions：`.github/workflows/docker-cicd.yml`
+- 已提供自动回滚部署脚本：`scripts/deploy-api-stable.sh`
+- 说明文档：`docs/cicd-docker.md`
 
 ---
 

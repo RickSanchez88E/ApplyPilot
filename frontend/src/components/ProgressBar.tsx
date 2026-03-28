@@ -4,19 +4,19 @@ import type { ProgressState, ProgressLogEntry } from '../hooks/useProgress';
 
 const STAGE_LABELS: Record<string, string> = {
   idle: 'Ready',
-  initializing: 'Initializing…',
-  checking_session: 'Checking session…',
-  scraping_page: 'Scraping…',
-  parsing_details: 'Parsing details…',
-  ats_enhancement: 'Enhancing data…',
-  dedup_insert: 'Deduplicating…',
+  initializing: 'Initializing...',
+  checking_session: 'Checking session...',
+  scraping_page: 'Scraping...',
+  parsing_details: 'Parsing details...',
+  ats_enhancement: 'Enhancing data...',
+  dedup_insert: 'Deduplicating...',
   completed: 'Complete',
   error: 'Error',
 };
 
 const LEVEL_COLORS: Record<string, string> = {
   info: 'var(--color-text-dim)',
-  warn: 'var(--color-warning, #d97706)',
+  warn: 'var(--color-warning)',
   error: 'var(--color-danger)',
   success: 'var(--color-success)',
 };
@@ -29,26 +29,23 @@ function formatTs(ts: number): string {
 }
 
 export function ProgressBar({ progress }: { progress: ProgressState | null }) {
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissedTerminalUpdatedAt, setDismissedTerminalUpdatedAt] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const stage = progress?.stage ?? 'idle';
   const isTerminal = stage === 'completed' || stage === 'error';
-  const isActive = stage !== 'idle' && stage !== 'completed' && stage !== 'error';
 
   useEffect(() => {
-    if (!isTerminal) {
-      setDismissed(false);
-      return;
-    }
-    const timer = setTimeout(() => setDismissed(true), AUTO_DISMISS_MS);
+    if (!isTerminal || !progress?.updatedAt) return;
+
+    const terminalUpdatedAt = progress.updatedAt;
+    const timer = setTimeout(() => {
+      setDismissedTerminalUpdatedAt(terminalUpdatedAt);
+    }, AUTO_DISMISS_MS);
+
     return () => clearTimeout(timer);
   }, [isTerminal, progress?.updatedAt]);
-
-  useEffect(() => {
-    if (isActive && !expanded) setExpanded(false);
-  }, [isActive]);
 
   useEffect(() => {
     if (expanded && logEndRef.current) {
@@ -61,6 +58,8 @@ export function ProgressBar({ progress }: { progress: ProgressState | null }) {
   const { percent, message, stats, logs = [] } = progress;
   const isComplete = stage === 'completed';
   const isError = stage === 'error';
+  const isActive = stage !== 'idle' && !isTerminal;
+  const dismissed = isTerminal && dismissedTerminalUpdatedAt === progress.updatedAt;
 
   if (stage === 'idle' || dismissed) return null;
 
@@ -72,7 +71,6 @@ export function ProgressBar({ progress }: { progress: ProgressState | null }) {
         exit={{ opacity: 0, height: 0 }}
         className="panel overflow-hidden"
       >
-        {/* Compact header — always visible */}
         <div className="px-4 pt-3 pb-2">
           <div className="flex justify-between items-center mb-1.5">
             <div className="flex items-center gap-2 min-w-0">
@@ -80,12 +78,12 @@ export function ProgressBar({ progress }: { progress: ProgressState | null }) {
                 <div className="w-3 h-3 shrink-0 rounded-full border-2 border-[var(--color-accent)] border-t-transparent animate-spin" />
               )}
               {isComplete && <span className="text-[var(--color-success)] text-sm font-semibold shrink-0">✓</span>}
-              {isError && <span className="text-[var(--color-danger)] text-sm font-semibold shrink-0">✗</span>}
+              {isError && <span className="text-[var(--color-danger)] text-sm font-semibold shrink-0">✕</span>}
               <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-[var(--color-text-secondary)] shrink-0">
                 {STAGE_LABELS[stage] || stage}
               </span>
               <span className="text-[11px] font-mono text-[var(--color-text-dim)] truncate">
-                — {message}
+                - {message}
               </span>
             </div>
             <div className="flex items-center gap-3 shrink-0">
@@ -105,7 +103,6 @@ export function ProgressBar({ progress }: { progress: ProgressState | null }) {
             </div>
           </div>
 
-          {/* Progress bar */}
           <div className="h-1 w-full bg-[var(--color-surface)] rounded-full overflow-hidden">
             <motion.div
               initial={{ width: 0 }}
@@ -120,7 +117,6 @@ export function ProgressBar({ progress }: { progress: ProgressState | null }) {
           </div>
         </div>
 
-        {/* Expandable log panel */}
         <AnimatePresence>
           {expanded && logs.length > 0 && (
             <motion.div

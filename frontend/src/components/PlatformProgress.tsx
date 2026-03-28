@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { t, type Locale } from '../lib/i18n';
+import { usePolling } from '../hooks/usePolling';
 
 interface CrawlRun {
   id: string;
@@ -18,9 +19,9 @@ interface CrawlRun {
 }
 
 const STATUS_STYLES: Record<string, { dot: string; text: string }> = {
-  running:   { dot: 'bg-[var(--color-accent)]', text: 'text-[var(--color-accent)]' },
+  running: { dot: 'bg-[var(--color-accent)]', text: 'text-[var(--color-accent)]' },
   completed: { dot: 'bg-[var(--color-success)]', text: 'text-[var(--color-success)]' },
-  failed:    { dot: 'bg-[var(--color-danger)]', text: 'text-[var(--color-danger)]' },
+  failed: { dot: 'bg-[var(--color-danger)]', text: 'text-[var(--color-danger)]' },
   cancelled: { dot: 'bg-[var(--color-warning)]', text: 'text-[var(--color-warning)]' },
 };
 
@@ -38,24 +39,24 @@ export function PlatformProgress({ source, locale }: { source: string; locale?: 
   const [runs, setRuns] = useState<CrawlRun[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchRuns = () => {
-      fetch(`/api/crawl-runs/latest?source=${source}&limit=8`)
-        .then(r => r.json())
-        .then(data => { setRuns(data.runs || []); setLoading(false); })
-        .catch(() => setLoading(false));
-    };
-    fetchRuns();
-    const iv = setInterval(fetchRuns, 15000);
-    return () => clearInterval(iv);
-  }, [source]);
+  usePolling(async (signal) => {
+    try {
+      const resp = await fetch(`/api/crawl-runs/latest?source=${source}&limit=8`, { signal });
+      const data = await resp.json();
+      setRuns(data.runs || []);
+    } finally {
+      setLoading(false);
+    }
+  }, 15000, [source]);
 
   if (loading) return <div className="panel p-4 h-24 animate-pulse" />;
-  if (runs.length === 0) return (
-    <div className="panel p-4">
-      <p className="text-xs font-mono text-[var(--color-text-dim)]">{t('progress.noRuns', locale)}</p>
-    </div>
-  );
+  if (runs.length === 0) {
+    return (
+      <div className="panel p-4">
+        <p className="text-xs font-mono text-[var(--color-text-dim)]">{t('progress.noRuns', locale)}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="panel overflow-hidden">
@@ -79,7 +80,7 @@ export function PlatformProgress({ source, locale }: { source: string; locale?: 
                 <span className="text-[var(--color-text-secondary)] w-12 text-right shrink-0">{formatDuration(run.duration_ms)}</span>
                 {run.jobs_found != null && (
                   <span className="text-[var(--color-text-dim)]">
-                    {run.jobs_found} found · {run.jobs_inserted ?? 0} new
+                    {run.jobs_found} {t('progress.found', locale)} · {run.jobs_inserted ?? 0} {t('progress.new', locale)}
                   </span>
                 )}
                 {run.evidence_summary && !run.jobs_found && (
@@ -100,24 +101,20 @@ export function PlatformProgress({ source, locale }: { source: string; locale?: 
 export function OverviewProgress({ locale }: { locale?: Locale }) {
   const [runs, setRuns] = useState<CrawlRun[]>([]);
 
-  useEffect(() => {
-    const fetchRuns = () => {
-      fetch('/api/crawl-runs/latest?limit=20')
-        .then(r => r.json())
-        .then(data => setRuns(data.runs || []))
-        .catch(() => {});
-    };
-    fetchRuns();
-    const iv = setInterval(fetchRuns, 15000);
-    return () => clearInterval(iv);
-  }, []);
+  usePolling(async (signal) => {
+    const resp = await fetch('/api/crawl-runs/latest?limit=20', { signal });
+    const data = await resp.json();
+    setRuns(data.runs || []);
+  }, 15000, []);
 
-  const bySource: Record<string, CrawlRun> = {};
-  for (const run of runs) {
-    if (!bySource[run.source]) bySource[run.source] = run;
-  }
+  const sources = useMemo(() => {
+    const bySource: Record<string, CrawlRun> = {};
+    for (const run of runs) {
+      if (!bySource[run.source]) bySource[run.source] = run;
+    }
+    return Object.entries(bySource);
+  }, [runs]);
 
-  const sources = Object.entries(bySource);
   if (sources.length === 0) return null;
 
   return (
@@ -137,7 +134,7 @@ export function OverviewProgress({ locale }: { locale?: Locale }) {
               <div className="text-[11px] font-mono text-[var(--color-text-dim)]">
                 <span className={style.text}>{t(`progress.${run.status}`, locale)}</span>
                 {run.duration_ms != null && <span> · {formatDuration(run.duration_ms)}</span>}
-                {run.jobs_inserted != null && run.jobs_inserted > 0 && <span> · +{run.jobs_inserted} new</span>}
+                {run.jobs_inserted != null && run.jobs_inserted > 0 && <span> · +{run.jobs_inserted} {t('progress.new', locale)}</span>}
               </div>
             </div>
           );

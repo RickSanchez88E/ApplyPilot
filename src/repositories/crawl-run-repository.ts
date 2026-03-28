@@ -59,3 +59,40 @@ export async function finishCrawlRun(runId: bigint, input: FinishRunInput): Prom
     ],
   );
 }
+
+export async function recoverStaleRunningCrawlRuns(input?: {
+  timeoutMinutes?: number;
+  status?: Extract<CrawlRunStatus, "failed" | "cancelled">;
+}): Promise<{ recovered: number; timeoutMinutes: number; status: "failed" | "cancelled" }> {
+  const timeoutMinutes = Math.max(input?.timeoutMinutes ?? 180, 1);
+  const status: "failed" | "cancelled" = input?.status === "cancelled" ? "cancelled" : "failed";
+  const result = await query<{ recovered: number }>(
+    `WITH stale AS (
+       SELECT id
+       FROM public.crawl_runs
+       WHERE status = 'running'
+         AND started_at < NOW() - ($1::text || ' minutes')::interval
+     )
+     UPDATE public.crawl_runs cr
+     SET
+       status = $2,
+       finished_at = NOW(),
+       duration_ms = EXTRACT(EPOCH FROM (NOW() - cr.started_at))::int * 1000,
+       error_type = COALESCE(cr.error_type, 'worker_crash_recovery'),
+       evidence_summary = CASE
+         WHEN cr.evidence_summary IS NULL OR btrim(cr.evidence_summary) = ''
+           THEN 'Recovered stale running run by crash-recovery policy'
+         ELSE cr.evidence_summary || ' | recovered_by=crash_recovery'
+       END
+     FROM stale
+     WHERE cr.id = stale.id
+     RETURNING 1`,
+    [String(timeoutMinutes), status],
+  );
+
+  return {
+    recovered: result.rowCount ?? 0,
+    timeoutMinutes,
+    status,
+  };
+}

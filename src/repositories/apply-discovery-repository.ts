@@ -69,6 +69,36 @@ export async function upsertApplyDiscovery(
       result.error ?? null,
     ],
   );
+
+  await query(
+    `UPDATE public.jobs_current
+     SET
+       apply_resolution_status = $2::public.apply_discovery_status,
+       apply_resolution_updated_at = NOW(),
+       apply_resolution_error = $3,
+       final_apply_url = CASE
+         WHEN $2::public.apply_discovery_status = 'final_form_reached'
+           THEN COALESCE($4, $5, final_apply_url)
+         ELSE final_apply_url
+       END,
+       apply_url = CASE
+         WHEN $2::public.apply_discovery_status = 'final_form_reached'
+           THEN COALESCE($4, $5, apply_url)
+         WHEN apply_url IS NULL OR btrim(apply_url) = ''
+           THEN COALESCE($5, apply_url)
+         ELSE apply_url
+       END,
+       updated_at = NOW()
+     WHERE job_key = $1`,
+    [
+      jobKey,
+      result.status,
+      result.error ?? null,
+      result.finalFormUrl ?? null,
+      result.resolvedUrl ?? null,
+    ],
+  );
+
   return res.rows[0]!.id;
 }
 
@@ -83,6 +113,12 @@ export async function getApplyDiscoveryByJobKey(jobKey: string): Promise<ApplyDi
 export async function getApplyDiscoveryStats(source?: string): Promise<{
   total: number;
   byStatus: Record<string, number>;
+  coverage: {
+    resolvedJobs: number;
+    unresolvedJobs: number;
+    totalJobs: number;
+    resolvedRate: number;
+  };
 }> {
   const whereClause = source ? "WHERE source = $1" : "";
   const params = source ? [source] : [];
@@ -101,7 +137,30 @@ export async function getApplyDiscoveryStats(source?: string): Promise<{
     byStatus[row.status] = row.count;
     total += row.count;
   }
-  return { total, byStatus };
+
+  const coverageRes = await query<{ resolved_jobs: number; unresolved_jobs: number; total_jobs: number }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE apply_resolution_status IS NOT NULL)::int AS resolved_jobs,
+       COUNT(*) FILTER (WHERE apply_resolution_status IS NULL)::int AS unresolved_jobs,
+       COUNT(*)::int AS total_jobs
+     FROM public.jobs_current ${whereClause}`,
+    params,
+  );
+
+  const resolvedJobs = coverageRes.rows[0]?.resolved_jobs ?? 0;
+  const unresolvedJobs = coverageRes.rows[0]?.unresolved_jobs ?? 0;
+  const totalJobs = coverageRes.rows[0]?.total_jobs ?? 0;
+
+  return {
+    total,
+    byStatus,
+    coverage: {
+      resolvedJobs,
+      unresolvedJobs,
+      totalJobs,
+      resolvedRate: totalJobs > 0 ? (resolvedJobs / totalJobs) * 100 : 0,
+    },
+  };
 }
 
 export async function getRecentApplyDiscoveries(

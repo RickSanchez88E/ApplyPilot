@@ -12,7 +12,14 @@ const DEFAULT_CONFIG: BreakerConfig = { maxFailures: 3, cooldownMs: 30 * 60 * 10
 
 const BREAKER_PREFIX = "breaker:";
 
-export type FailureType = "cf_block" | "login_failure" | "tunnel_failure" | "timeout" | "parse_error";
+export type FailureType =
+  | "cf_block"
+  | "login_failure"
+  | "authwall"
+  | "tunnel_failure"
+  | "timeout"
+  | "transient_network"
+  | "parse_error";
 
 export interface BreakerState {
   source: string;
@@ -83,6 +90,39 @@ export async function getBreakerState(source: string): Promise<BreakerState> {
 export async function isSourceInCooldown(source: string): Promise<boolean> {
   const state = await getBreakerState(source);
   return state.isOpen;
+}
+
+/**
+ * Force-open the breaker: immediately enter cooldown regardless of failure count.
+ * Used by destroyOnBreaker for confirmed severe failures (CF block, login failure, etc.).
+ * Unlike recordFailure(), this does NOT require cumulative failures to reach a threshold.
+ */
+export async function forceOpenBreaker(
+  source: string,
+  failureType: FailureType,
+  cooldownMs: number = DEFAULT_CONFIG.cooldownMs,
+): Promise<BreakerState> {
+  const redis = getRedisConnection();
+  const key = `${BREAKER_PREFIX}${source}`;
+  const now = new Date().toISOString();
+  const cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
+  const failures = await redis.hincrby(key, "consecutiveFailures", 1);
+
+  await redis.hset(
+    key,
+    "lastFailureAt", now,
+    "lastFailureType", failureType,
+    "forcedOpen", "true",
+    "cooldownUntil", cooldownUntil,
+    "isOpen", "true",
+  );
+
+  log.warn({ source, cooldownUntil, cooldownMs, failureType },
+    "Circuit breaker FORCE-OPENED — immediate cooldown (destroyOnBreaker)");
+
+  await updateDbCooldown(source, cooldownUntil, `destroyOnBreaker:${failureType}`);
+
+  return { source, consecutiveFailures: failures, lastFailureAt: now, cooldownUntil, isOpen: true };
 }
 
 export async function forceResetBreaker(source: string): Promise<void> {

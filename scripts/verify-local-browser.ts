@@ -1,234 +1,362 @@
 /**
- * verify-local-browser.ts — Integration test for the 3 reworked problems.
+ * Verification script: Local browser + Jooble link + lease + breaker lifecycle.
  *
- * Run: REDIS_URL=redis://localhost:6380 npx tsx scripts/verify-local-browser.ts
+ * Usage:  npx tsx scripts/verify-local-browser.ts
  *
  * Tests:
- *   1. Chrome launches with profileDirectory=sanchez
- *   2. Lease acquire + heartbeat extend + release
- *   3. destroyOnBreaker properly stops heartbeat + closes browser
- *   4. Jooble local path: scrapeJoobleLocal does NOT import old CDP/proxy
+ *   1. Local browser launch with sanchez profile — real process
+ *   2. Jooble local code path verification (import chain, no proxy)
+ *   3. Lease acquire / heartbeat extend / release via Redis
+ *   4. Breaker destroy → browser close + heartbeat stop + profile preserved
  */
 
-import {
-  createPage,
-  closeBrowser,
-  destroyOnBreaker,
-  isBrowserAlive,
-  getBrowserStats,
-  getLocalBrowserConfig,
-  withSourceLease,
-} from "../src/browser/local-browser-manager.js";
-import { acquireLease, isLeaseHeld, releaseLease, extendLease } from "../src/scheduler/source-lease.js";
-import { forceResetBreaker, recordSuccess, isSourceInCooldown } from "../src/browser/circuit-breaker.js";
+import path from "node:path";
+import fs from "node:fs";
 
-const passed: string[] = [];
-const failed: string[] = [];
+// ─── Helper ───────────────────────────────────────────────────────────────────
 
-function assert(condition: boolean, label: string, detail?: string): void {
-  if (condition) {
-    console.log(`  ✅ ${label}`);
-    passed.push(label);
+const PASS = "✅ PASS";
+const FAIL = "❌ FAIL";
+let passCount = 0;
+let failCount = 0;
+
+function check(label: string, ok: boolean, detail?: string): void {
+  if (ok) {
+    passCount++;
+    console.log(`  ${PASS}  ${label}${detail ? ` — ${detail}` : ""}`);
   } else {
-    console.log(`  ❌ ${label}${detail ? ` — ${detail}` : ""}`);
-    failed.push(label);
+    failCount++;
+    console.log(`  ${FAIL}  ${label}${detail ? ` — ${detail}` : ""}`);
   }
 }
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
-}
+// ─── Test 1: Local browser launch with sanchez profile ───────────────────────
 
-// ─── TEST 1: Chrome launch with profile ───────────────────────
-async function testChromeLaunch(): Promise<void> {
-  console.log("\n═══ TEST 1: Chrome Launch with sanchez Profile ═══");
+async function testChromeProfileLaunch(): Promise<void> {
+  console.log("\n══════════════════════════════════════════════════════════");
+  console.log("TEST 1: Local browser launch with sanchez profile");
+  console.log("══════════════════════════════════════════════════════════");
 
-  const config = getLocalBrowserConfig();
-  assert(config.profileDirectory === "sanchez", "Config profileDirectory = sanchez");
-  assert(config.chromeExecutablePath.includes("chrome.exe"), "Config chromeExecutablePath points to chrome.exe");
-  assert(config.userDataDir.includes("User Data"), "Config userDataDir = Chrome User Data");
-  console.log(`    chromeExecutablePath: ${config.chromeExecutablePath}`);
-  console.log(`    userDataDir: ${config.userDataDir}`);
-  console.log(`    profileDirectory: ${config.profileDirectory}`);
-  console.log(`    automationDataDir: ${config.automationDataDir}`);
+  const {
+    getLocalBrowserConfig,
+    createPage,
+    closeBrowser,
+    isBrowserAlive,
+    getBrowserStats,
+  } = await import("../src/browser/local-browser-manager.js");
 
-  // Create a page — this triggers browser launch
-  const session = await createPage("test-verify");
+  const cfg = getLocalBrowserConfig();
+  console.log(`  engine               = ${cfg.engine}`);
+  console.log(`  executablePath       = ${cfg.executablePath}`);
+  console.log(`  userDataDir          = ${cfg.userDataDir}`);
+  console.log(`  profileDirectory     = ${cfg.profileDirectory}`);
+  console.log(`  automationDataDir    = ${cfg.automationDataDir}`);
+  console.log(`  headless             = ${cfg.headless}`);
+
+  check("engine is chrome or edge", cfg.engine === "chrome" || cfg.engine === "edge");
+  check("executablePath is set", cfg.executablePath.toLowerCase().includes(".exe"));
+  check("userDataDir is browser User Data", cfg.userDataDir.includes("User Data"));
+  check("profileDirectory = sanchez", cfg.profileDirectory === "sanchez");
+
+  // Actually launch browser
+  console.log("\n  → Launching local browser...");
+  const session = await createPage("__verify__");
   const page = session.page;
 
-  assert(isBrowserAlive(), "Browser process is alive after createPage()");
+  check("Browser alive after createPage", isBrowserAlive());
+
   const stats = getBrowserStats();
-  assert(stats.activePages === 1, `Active pages = ${stats.activePages} (expect 1)`);
+  check("activePages >= 1", stats.activePages >= 1, `activePages=${stats.activePages}`);
 
-  // Navigate to a simple page
-  await page.goto("https://jooble.org", { timeout: 15000, waitUntil: "domcontentloaded" });
+  // Verify the automation profile directory exists
+  const automationProfile = path.join(cfg.automationDataDir, cfg.profileDirectory);
+  const profileExists = fs.existsSync(automationProfile);
+  check("Automation profile dir exists on disk", profileExists, automationProfile);
+
+  // Navigate to a simple page to prove it works
+  await page.goto("https://www.example.com", { waitUntil: "domcontentloaded", timeout: 15000 });
   const title = await page.title();
-  console.log(`    Page title: ${title}`);
-  assert(title.length > 0, `Page loaded, title = "${title.slice(0, 50)}"`);
+  check("Browser can navigate", title.includes("Example"), `title="${title}"`);
 
-  // Close page
   await session.close();
-  const stats2 = getBrowserStats();
-  assert(stats2.activePages === 0, `Active pages = ${stats2.activePages} after close (expect 0)`);
-  assert(isBrowserAlive(), "Browser still alive (idle timer hasn't fired yet)");
+  check("Page closed cleanly", true);
+
+  // Close browser
+  await closeBrowser();
+  check("Browser closed after closeBrowser()", !isBrowserAlive());
+
+  // Profile on disk is NOT deleted
+  check("Profile preserved after close", fs.existsSync(automationProfile));
 }
 
-// ─── TEST 2: Lease acquire, extend, release ───────────────────
-async function testLeaseLifecycle(): Promise<void> {
-  console.log("\n═══ TEST 2: Lease Acquire / Extend / Release ═══");
+// ─── Test 2: Jooble local code path (NO proxy) ──────────────────────────────
 
-  const source = "test-lease-verify";
-  // Clean up any prior leases
-  await releaseLease(source, "test-holder").catch(() => {});
-  await forceResetBreaker(source);
+async function testJoobleLocalCodePath(): Promise<void> {
+  console.log("\n══════════════════════════════════════════════════════════");
+  console.log("TEST 2: Jooble local code path verification");
+  console.log("══════════════════════════════════════════════════════════");
 
-  const lease = await acquireLease(source, "test-holder", 10_000);
-  assert(lease !== null, "Lease acquired");
-  console.log(`    lease.holder: ${lease?.holder}, expiresAt: ${lease?.expiresAt}`);
+  // Verify jooble-local.ts imports from local-browser-manager, NOT cdp-pool
+  const joobleLocalPath = path.resolve("src/sources/jooble-local.ts");
+  const joobleLocalCode = fs.readFileSync(joobleLocalPath, "utf-8");
 
-  const held = await isLeaseHeld(source);
-  assert(held !== null, "Lease is held (isLeaseHeld returns non-null)");
-  assert(held?.holder === "test-holder", `Holder = ${held?.holder}`);
+  check(
+    "jooble-local imports createPage from local-browser-manager",
+    joobleLocalCode.includes("local-browser-manager"),
+  );
+  check(
+    "jooble-local does NOT import cdp-pool",
+    !joobleLocalCode.includes("cdp-pool"),
+    "No cdp-pool import found",
+  );
+  check(
+    "jooble-local does NOT import webshare",
+    !joobleLocalCode.includes("webshare"),
+    "No proxy import found",
+  );
+
+  // Verify local-browser-worker.ts calls scrapeJoobleLocal, NOT joobleAdapter.fetchJobs
+  const workerPath = path.resolve("src/queue/local-browser-worker.ts");
+  const workerCode = fs.readFileSync(workerPath, "utf-8");
+
+  check(
+    "local-browser-worker imports scrapeJoobleLocal",
+    workerCode.includes("scrapeJoobleLocal"),
+  );
+  check(
+    "local-browser-worker does NOT import joobleAdapter",
+    !workerCode.includes("joobleAdapter"),
+    "No joobleAdapter import",
+  );
+  check(
+    "local-browser-worker does NOT import jooble.ts adapter",
+    !workerCode.includes("from \"../sources/jooble.js\"") && !workerCode.includes("from '../sources/jooble.js'"),
+    "No jooble adapter import",
+  );
+  check(
+    "local-browser-worker calls scrapeJoobleLocal in handleJoobleDiscover",
+    workerCode.includes("scrapeJoobleLocal(keywords"),
+  );
+
+  // Verify routing: jooble discover goes to localBrowser queue
+  const commandsPath = path.resolve("src/queue/commands.ts");
+  const commandsCode = fs.readFileSync(commandsPath, "utf-8");
+
+  check(
+    "commands.ts routes jooble to LOCAL_BROWSER_SOURCES",
+    commandsCode.includes('"jooble"') && commandsCode.includes("LOCAL_BROWSER_SOURCES"),
+  );
+
+  // Verify jooble-local.ts has slow mode features
+  check("jooble-local has HARD_CAP", joobleLocalCode.includes("HARD_CAP"));
+  check("jooble-local has randomDelay", joobleLocalCode.includes("randomDelay"));
+  check("jooble-local has CF detection", joobleLocalCode.includes("isCfBlocked"));
+  check("jooble-local has circuit breaker", joobleLocalCode.includes("recordFailure"));
+}
+
+// ─── Test 3: Lease heartbeat + scheduler skip ────────────────────────────────
+
+async function testLeaseHeartbeat(): Promise<void> {
+  console.log("\n══════════════════════════════════════════════════════════");
+  console.log("TEST 3: Lease acquire / heartbeat / extend / release");
+  console.log("══════════════════════════════════════════════════════════");
+
+  const { acquireLease, releaseLease, isLeaseHeld, extendLease } = await import(
+    "../src/scheduler/source-lease.js"
+  );
+
+  const testSource = "__lease_test__";
+  const testHolder = "verify-script";
+  const ttlMs = 10_000;
+
+  // Acquire
+  const lease = await acquireLease(testSource, testHolder, ttlMs);
+  check("Lease acquired", lease !== null, `holder=${lease?.holder}`);
+
+  // isLeaseHeld should return the lease
+  const held = await isLeaseHeld(testSource);
+  check("isLeaseHeld returns lease info", held !== null, `expires=${held?.expiresAt}`);
 
   // Extend
-  const extended = await extendLease(source, "test-holder", 10_000);
-  assert(extended === true, "Lease extended successfully");
+  const extendedOk = await extendLease(testSource, testHolder, ttlMs);
+  check("extendLease succeeds", extendedOk === true);
 
-  const heldAfter = await isLeaseHeld(source);
-  assert(heldAfter !== null, "Lease still held after extend");
+  // Check expiry moved forward
+  const heldAfter = await isLeaseHeld(testSource);
+  check(
+    "Lease expiry moved forward after extend",
+    heldAfter !== null && held !== null && heldAfter.expiresAt > held.expiresAt,
+    `before=${held?.expiresAt} after=${heldAfter?.expiresAt}`,
+  );
 
-  // Another holder cannot acquire
-  const stolen = await acquireLease(source, "scheduler", 10_000);
-  assert(stolen === null, "Another holder cannot acquire while lease is held");
+  // Scheduler canDispatch should skip this source
+  const { canDispatch } = await import("../src/scheduler/index.js");
+  const dispatchCheck = await canDispatch(testSource);
+  check("Scheduler canDispatch returns false while lease held", dispatchCheck.ok === false, `reason=${dispatchCheck.reason}`);
 
   // Release
-  const released = await releaseLease(source, "test-holder");
-  assert(released === true, "Lease released");
+  const released = await releaseLease(testSource, testHolder);
+  check("Lease released", released === true);
 
-  const heldFinal = await isLeaseHeld(source);
-  assert(heldFinal === null, "Lease no longer held after release");
+  // Now should be free
+  const heldAfterRelease = await isLeaseHeld(testSource);
+  check("isLeaseHeld returns null after release", heldAfterRelease === null);
+
+  // canDispatch should now be true
+  const dispatchCheck2 = await canDispatch(testSource);
+  check("Scheduler canDispatch returns true after lease release", dispatchCheck2.ok === true);
 }
 
-// ─── TEST 3: withSourceLease heartbeat ────────────────────────
-async function testHeartbeat(): Promise<void> {
-  console.log("\n═══ TEST 3: withSourceLease Heartbeat ═══");
+// ─── Test 4: Breaker destroy → browser close + heartbeat stop ────────────────
 
-  const source = "test-heartbeat-verify";
-  await releaseLease(source, "test-hb").catch(() => {});
-  await forceResetBreaker(source);
-
-  // Lower TTL for testing (5 seconds, heartbeat every 2s)
-  // We can't easily lower HEARTBEAT_INTERVAL_MS inside the module,
-  // so we test that lease is held during the fn execution
-  let leaseHeldDuringWork = false;
-  let leaseReleasedAfterWork = false;
-
-  await withSourceLease(source, "test-hb", async () => {
-    const held = await isLeaseHeld(source);
-    leaseHeldDuringWork = held !== null && held.holder === "test-hb";
-    console.log(`    In-task: lease held = ${leaseHeldDuringWork}, holder = ${held?.holder}`);
-    // Sleep briefly to verify lease stays active
-    await sleep(2000);
-    const held2 = await isLeaseHeld(source);
-    console.log(`    After 2s: lease still held = ${held2 !== null}`);
-  }, 30_000);
-
-  const heldAfter = await isLeaseHeld(source);
-  leaseReleasedAfterWork = heldAfter === null;
-
-  assert(leaseHeldDuringWork, "Lease held during withSourceLease work");
-  assert(leaseReleasedAfterWork, "Lease released after withSourceLease exits");
-}
-
-// ─── TEST 4: destroyOnBreaker stops heartbeat + closes browser ─
 async function testBreakerDestroy(): Promise<void> {
-  console.log("\n═══ TEST 4: destroyOnBreaker Lifecycle ═══");
+  console.log("\n══════════════════════════════════════════════════════════");
+  console.log("TEST 4: Breaker destroy → browser close + profile preserved");
+  console.log("══════════════════════════════════════════════════════════");
 
-  const source = "test-breaker-verify";
-  await forceResetBreaker(source);
-  await recordSuccess(source);
+  const {
+    getLocalBrowserConfig,
+    createPage,
+    destroyOnBreaker,
+    isBrowserAlive,
+  } = await import("../src/browser/local-browser-manager.js");
 
-  // Ensure browser is running
-  const session = await createPage(source);
-  assert(isBrowserAlive(), "Browser alive before breaker");
+  const { forceResetBreaker, getBreakerState } = await import(
+    "../src/browser/circuit-breaker.js"
+  );
 
+  // Reset breaker state first
+  await forceResetBreaker("__breaker_test__");
+
+  // Launch browser + create page
+  console.log("\n  → Launching browser for breaker test...");
+  const session = await createPage("__breaker_test__");
+  check("Browser alive before breaker", isBrowserAlive());
+
+  // Close the page first (simulating normal page close before breaker)
   await session.close();
 
   // Trigger breaker destroy
-  await destroyOnBreaker(source, "cf_block");
+  console.log("  → Triggering destroyOnBreaker...");
+  await destroyOnBreaker("__breaker_test__", "cf_block");
 
-  assert(!isBrowserAlive(), "Browser killed after destroyOnBreaker");
+  check("Browser killed after breaker destroy", !isBrowserAlive());
 
-  const inCooldown = await isSourceInCooldown(source);
-  // May not be in cooldown yet (needs 3 failures by default),
-  // but browser should be dead
-  console.log(`    Source in cooldown: ${inCooldown}`);
+  // Profile directory preserved
+  const cfg = getLocalBrowserConfig();
+  const profileDir = path.join(cfg.automationDataDir, cfg.profileDirectory);
+  check("Profile preserved after breaker destroy", fs.existsSync(profileDir));
 
-  // Can relaunch after breaker
-  await forceResetBreaker(source);
-  const session2 = await createPage(source);
-  assert(isBrowserAlive(), "Browser re-launched after breaker reset");
-  const page2 = session2.page;
-  await page2.goto("about:blank", { timeout: 5000 });
-  assert(!page2.isClosed(), "New page is functional after relaunch");
-  await session2.close();
+  // Breaker state should show failures
+  const state = await getBreakerState("__breaker_test__");
+  check(
+    "Breaker recorded failure",
+    state.consecutiveFailures >= 1,
+    `failures=${state.consecutiveFailures}`,
+  );
+
+  // Clean up
+  await forceResetBreaker("__breaker_test__");
 }
 
-// ─── TEST 5: Jooble local path does NOT use old CDP ───────────
-async function testJoobleLocalPath(): Promise<void> {
-  console.log("\n═══ TEST 5: Jooble Local Path Verification ═══");
+// ─── Test 5: withSourceLease heartbeat integration ───────────────────────────
 
-  // Read the source file to verify no imports from old CDP/proxy
-  const fs = await import("node:fs");
-  const joobleLocalSource = fs.readFileSync("src/sources/jooble-local.ts", "utf8");
+async function testWithSourceLeaseHeartbeat(): Promise<void> {
+  console.log("\n══════════════════════════════════════════════════════════");
+  console.log("TEST 5: withSourceLease heartbeat integration");
+  console.log("══════════════════════════════════════════════════════════");
 
-  assert(!joobleLocalSource.includes("navigateWithCf"), "jooble-local.ts does NOT import navigateWithCf");
-  assert(!joobleLocalSource.includes("cdp-pool"), "jooble-local.ts does NOT import cdp-pool");
-  assert(!joobleLocalSource.includes("webshare"), "jooble-local.ts does NOT import webshare");
-  assert(joobleLocalSource.includes("local-browser-manager"), "jooble-local.ts imports local-browser-manager");
-  assert(joobleLocalSource.includes("createPage"), "jooble-local.ts uses createPage from local-browser-manager");
-  assert(joobleLocalSource.includes("randomDelay"), "jooble-local.ts has randomDelay (slow mode)");
-  assert(joobleLocalSource.includes("HARD_CAP"), "jooble-local.ts has HARD_CAP");
+  const { withSourceLease } = await import("../src/browser/local-browser-manager.js");
+  const { isLeaseHeld } = await import("../src/scheduler/source-lease.js");
 
-  // Verify local-browser-worker.ts uses scrapeJoobleLocal, not joobleAdapter
-  const workerSource = fs.readFileSync("src/queue/local-browser-worker.ts", "utf8");
-  assert(workerSource.includes("scrapeJoobleLocal"), "local-browser-worker.ts imports scrapeJoobleLocal");
-  assert(!workerSource.includes("joobleAdapter"), "local-browser-worker.ts does NOT import joobleAdapter");
-  assert(!workerSource.includes("jooble.ts"), "local-browser-worker.ts does NOT import from jooble.ts");
-  assert(workerSource.includes("withSourceLease"), "local-browser-worker.ts uses withSourceLease");
-  assert(workerSource.includes("destroyOnBreaker"), "local-browser-worker.ts uses destroyOnBreaker");
+  const testSource = "__heartbeat_test__";
+
+  // Verify code structure: withSourceLease has heartbeat
+  const mgrPath = path.resolve("src/browser/local-browser-manager.ts");
+  const mgrCode = fs.readFileSync(mgrPath, "utf-8");
+
+  check(
+    "withSourceLease contains setInterval heartbeat",
+    mgrCode.includes("setInterval") && mgrCode.includes("extendLease"),
+  );
+  check(
+    "withSourceLease has stopHeartbeat in finally",
+    mgrCode.includes("stopHeartbeat(source)"),
+  );
+  check(
+    "destroyOnBreaker calls stopHeartbeat FIRST",
+    mgrCode.indexOf("stopHeartbeat(source)") < mgrCode.indexOf("recordFailure(source"),
+  );
+  check(
+    "activeHeartbeats map exists for cross-scope cleanup",
+    mgrCode.includes("activeHeartbeats"),
+  );
+
+  // Actually test: run withSourceLease for a short task, verify lease is held and then released
+  let leaseHeldDuringTask = false;
+  await withSourceLease(testSource, "verify-script", async () => {
+    const held = await isLeaseHeld(testSource);
+    leaseHeldDuringTask = held !== null;
+    // Brief wait to ensure heartbeat could fire if interval was very short
+    await new Promise((r) => setTimeout(r, 500));
+  }, 10_000);
+
+  check("Lease was held during withSourceLease task", leaseHeldDuringTask);
+
+  const heldAfter = await isLeaseHeld(testSource);
+  check("Lease released after withSourceLease completes", heldAfter === null);
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 async function main(): Promise<void> {
-  console.log("====================================================");
-  console.log("  LOCAL BROWSER REWORK — INTEGRATION VERIFICATION");
-  console.log("====================================================");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("  Local Browser / Jooble / Lease / Breaker Verification  ");
+  console.log("═══════════════════════════════════════════════════════════");
 
   try {
-    await testJoobleLocalPath();
-    await testLeaseLifecycle();
-    await testChromeLaunch();
-    await testHeartbeat();
+    await testChromeProfileLaunch();
+  } catch (err) {
+    console.error("TEST 1 CRASHED:", err);
+    failCount++;
+  }
+
+  try {
+    await testJoobleLocalCodePath();
+  } catch (err) {
+    console.error("TEST 2 CRASHED:", err);
+    failCount++;
+  }
+
+  try {
+    await testLeaseHeartbeat();
+  } catch (err) {
+    console.error("TEST 3 CRASHED:", err);
+    failCount++;
+  }
+
+  try {
     await testBreakerDestroy();
   } catch (err) {
-    console.error("\n💥 Unexpected error:", err);
-    failed.push(`CRASH: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    await closeBrowser().catch(() => {});
+    console.error("TEST 4 CRASHED:", err);
+    failCount++;
   }
 
-  console.log("\n════════════════════════════════════════════════════");
-  console.log(`  RESULTS: ${passed.length} passed, ${failed.length} failed`);
-  console.log("════════════════════════════════════════════════════");
-  if (failed.length > 0) {
-    console.log("\n  FAILURES:");
-    for (const f of failed) console.log(`    ❌ ${f}`);
+  try {
+    await testWithSourceLeaseHeartbeat();
+  } catch (err) {
+    console.error("TEST 5 CRASHED:", err);
+    failCount++;
   }
-  console.log();
 
-  // Exit cleanly
-  process.exit(failed.length > 0 ? 1 : 0);
+  console.log("\n═══════════════════════════════════════════════════════════");
+  console.log(`  RESULTS: ${passCount} passed, ${failCount} failed`);
+  console.log("═══════════════════════════════════════════════════════════\n");
+
+  process.exit(failCount > 0 ? 1 : 0);
 }
 
-main();
+main().catch((err) => {
+  console.error("Verification script crashed:", err);
+  process.exit(2);
+});

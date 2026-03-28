@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { SOURCES } from '../lib/utils';
 import { t, type Locale } from '../lib/i18n';
 import { OverviewProgress } from './PlatformProgress';
 import { KeywordConfig } from './KeywordConfig';
+import { usePolling } from '../hooks/usePolling';
 
 interface SourceStat {
   source: string;
@@ -24,6 +25,12 @@ interface OverviewStats {
 interface ApplyStats {
   total: number;
   byStatus: Record<string, number>;
+  coverage?: {
+    resolvedJobs: number;
+    unresolvedJobs: number;
+    totalJobs: number;
+    resolvedRate: number;
+  };
 }
 
 function AnimatedNumber({ value }: { value: number }) {
@@ -34,21 +41,14 @@ export function OverviewPage({ locale }: { locale: Locale }) {
   const [stats, setStats] = useState<OverviewStats | null>(null);
   const [applyStats, setApplyStats] = useState<ApplyStats | null>(null);
 
-  useEffect(() => {
-    const fetchAll = () => {
-      fetch('/api/jobs/stats')
-        .then(r => r.json())
-        .then(setStats)
-        .catch(() => {});
-      fetch('/api/apply-discovery/stats')
-        .then(r => r.json())
-        .then(setApplyStats)
-        .catch(() => {});
-    };
-    fetchAll();
-    const iv = setInterval(fetchAll, 30000);
-    return () => clearInterval(iv);
-  }, []);
+  usePolling(async (signal) => {
+    const [statsResp, applyResp] = await Promise.all([
+      fetch('/api/jobs/stats', { signal }),
+      fetch('/api/apply-discovery/stats', { signal }),
+    ]);
+    setStats(await statsResp.json());
+    setApplyStats(await applyResp.json());
+  }, 30000, []);
 
   if (!stats) return <div className="h-40 panel animate-pulse" />;
 
@@ -61,10 +61,12 @@ export function OverviewPage({ locale }: { locale: Locale }) {
   ];
 
   const maxCount = Math.max(...(stats.bySource || []).map(s => s.count), 1);
+  const loginCount = (applyStats?.byStatus.requires_login ?? 0)
+    + (applyStats?.byStatus.oauth_google ?? 0)
+    + (applyStats?.byStatus.oauth_linkedin ?? 0);
 
   return (
     <div className="space-y-5">
-      {/* KPI row */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {kpis.map((kpi, i) => (
           <motion.div
@@ -81,7 +83,6 @@ export function OverviewPage({ locale }: { locale: Locale }) {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        {/* Source distribution */}
         <div className="lg:col-span-2 panel p-5">
           <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-4">{t('overview.sourceDistribution', locale)}</h3>
           <div className="space-y-2.5">
@@ -90,7 +91,7 @@ export function OverviewPage({ locale }: { locale: Locale }) {
               const meta = SOURCES[src.source];
               return (
                 <div key={src.source} className="flex items-center gap-3">
-                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-medium w-16 justify-center ${meta?.bg ?? 'bg-gray-100'} ${meta?.text ?? 'text-gray-700'}`}>
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-medium w-16 justify-center ${meta?.bg ?? 'bg-[var(--color-surface)]'} ${meta?.text ?? 'text-[var(--color-text-secondary)]'}`}>
                     {meta?.label ?? src.source}
                   </span>
                   <div className="flex-1 h-4 bg-[var(--color-surface)] rounded overflow-hidden">
@@ -111,9 +112,8 @@ export function OverviewPage({ locale }: { locale: Locale }) {
           </div>
         </div>
 
-        {/* Sidebar: config + duplicates + apply stats */}
         <div className="space-y-5">
-          <KeywordConfig />
+          <KeywordConfig locale={locale} />
           {stats.duplicateInfo && (
             <div className="panel p-5">
               <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('overview.crossPlatformDuplicates', locale)}</h3>
@@ -130,7 +130,6 @@ export function OverviewPage({ locale }: { locale: Locale }) {
             </div>
           )}
 
-          {/* Apply Discovery Overview */}
           {applyStats && applyStats.total > 0 && (
             <div className="panel p-5">
               <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('overview.applyResolution', locale)}</h3>
@@ -145,12 +144,24 @@ export function OverviewPage({ locale }: { locale: Locale }) {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--color-text-dim)]">{t('overview.loginRequired', locale)}</span>
-                  <span className="text-amber-600">{(applyStats.byStatus.requires_login ?? 0) + (applyStats.byStatus.oauth_google ?? 0) + (applyStats.byStatus.oauth_linkedin ?? 0)}</span>
+                  <span className="text-[var(--color-warning)]">{loginCount}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--color-text-dim)]">{t('overview.blocked', locale)}</span>
                   <span className="text-[var(--color-danger)]">{applyStats.byStatus.blocked ?? 0}</span>
                 </div>
+                {applyStats.coverage && (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-dim)]">{t('overview.coverage', locale)}</span>
+                      <span className="text-[var(--color-text)]">{applyStats.coverage.resolvedRate.toFixed(1)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[var(--color-text-dim)]">{t('overview.unresolvedJobs', locale)}</span>
+                      <span className="text-[var(--color-warning)]">{applyStats.coverage.unresolvedJobs}</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}

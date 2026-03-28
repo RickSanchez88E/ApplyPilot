@@ -19,6 +19,7 @@
     "trigger": "tsx scripts/trigger.ts",
     "trigger:force": "tsx scripts/trigger.ts --force",
     "trigger:multi": "tsx scripts/trigger-multi.ts",
+    "agent:harness": "tsx scripts/agent-harness.ts --format markdown",
     "probe:jooble": "tsx scripts/probe-jooble-camoufox.ts",
     "backfill:jooble-apply": "tsx scripts/backfill-jooble-apply-urls.ts",
     "probe:webshare-parallel": "tsx scripts/webshare-parallel-jooble-desc.ts",

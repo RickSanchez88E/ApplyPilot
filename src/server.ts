@@ -11,9 +11,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createChildLogger } from "./lib/logger.js";
 import { getProgress, onProgress, offProgress, type ProgressState } from "./lib/progress.js";
-import { acquireLease, releaseLease, isLeaseHeld } from "./scheduler/source-lease.js";
+import { releaseLease, isLeaseHeld } from "./scheduler/source-lease.js";
 import { getBreakerState, forceResetBreaker, isSourceInCooldown } from "./browser/circuit-breaker.js";
 import { getApplyDiscoveryStats, getRecentApplyDiscoveries } from "./repositories/apply-discovery-repository.js";
+import { dispatchApplyDiscoveryBackfill } from "./domain/apply-discovery/dispatch.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -264,7 +265,7 @@ app.post("/api/trigger/multi", async (req, res) => {
   }
 });
 
-// ── Per-source trigger (dispatch single source, acquires lease) ──
+// ── Per-source trigger (dispatch single source; lease owned by worker) ──
 app.post("/api/trigger/source/:source", async (req, res) => {
   const { source } = req.params;
   const { timeFilter, force } = req.body ?? {};
@@ -285,14 +286,13 @@ app.post("/api/trigger/source/:source", async (req, res) => {
       log.info({ source }, "Manual trigger force-reset breaker");
     }
 
-    const lease = await acquireLease(source, "manual-trigger", 15 * 60 * 1000);
-    if (!lease) {
-      const existing = await isLeaseHeld(source);
+    const existing = await isLeaseHeld(source);
+    if (existing) {
       return res.status(409).json({
         error: "source_busy",
         source,
-        currentHolder: existing?.holder,
-        expiresAt: existing?.expiresAt,
+        currentHolder: existing.holder,
+        expiresAt: existing.expiresAt,
       });
     }
 
@@ -306,8 +306,8 @@ app.post("/api/trigger/source/:source", async (req, res) => {
     };
     const queue = routeCommand(payload);
     const jobId = await dispatch(payload);
-    log.info({ source, queue, jobId }, "Single-source dispatch (manual, lease acquired)");
-    res.json({ status: "dispatched", source, queue, jobId, timeFilter, leaseHolder: "manual-trigger" });
+    log.info({ source, queue, jobId }, "Single-source dispatch (manual, worker will acquire lease)");
+    res.json({ status: "dispatched", source, queue, jobId, timeFilter, leaseMode: "worker-owned" });
   } catch (err) {
     log.error({ err, source }, "Single-source dispatch failed");
     res.status(500).json({ error: "Dispatch failed" });
@@ -586,6 +586,19 @@ app.post("/api/apply-discovery/resolve", async (req, res) => {
   } catch (err) {
     log.error({ err }, "Apply discovery dispatch failed");
     res.status(500).json({ error: "Apply discovery dispatch failed" });
+  }
+});
+
+// ── Batch backfill dispatch for resolve_apply ──────────────────
+app.post("/api/apply-discovery/backfill", async (req, res) => {
+  try {
+    const source = typeof req.body?.source === "string" ? req.body.source : undefined;
+    const limit = Math.min(Number(req.body?.limit) || 50, 500);
+    const result = await dispatchApplyDiscoveryBackfill({ source, limit });
+    res.json({ source: source ?? "all", ...result });
+  } catch (err) {
+    log.error({ err }, "Apply discovery backfill dispatch failed");
+    res.status(500).json({ error: "Apply discovery backfill dispatch failed" });
   }
 });
 

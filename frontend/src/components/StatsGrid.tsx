@@ -2,23 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 
 function AnimatedNumber({ value }: { value: number }) {
-  const [display, setDisplay] = useState(value);
-  const [highlight, setHighlight] = useState(false);
-
-  useEffect(() => {
-    if (value !== display) {
-      setHighlight(true);
-      setDisplay(value);
-      const timer = setTimeout(() => setHighlight(false), 800);
-      return () => clearTimeout(timer);
-    }
-  }, [value, display]);
-
-  return (
-    <span className={`transition-colors duration-500 font-mono ${highlight ? 'text-[var(--color-accent)]' : 'text-[var(--color-text)]'}`}>
-      {display.toLocaleString()}
-    </span>
-  );
+  return <span className="font-mono text-[var(--color-text)]">{value.toLocaleString()}</span>;
 }
 
 export function StatsGrid({ activeTab }: { activeTab: string | null }) {
@@ -47,7 +31,7 @@ export function StatsGrid({ activeTab }: { activeTab: string | null }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {items.map((it, i) => (
-        <motion.div 
+        <motion.div
           key={it.label}
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}

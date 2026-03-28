@@ -4,8 +4,11 @@
  *   - Jooble discover_jobs (slow mode via jooble-local.ts)
  *   - resolve_apply for any source needing real browser + login state
  *
- * IMPORTANT: This worker does NOT use the old CDP pool / Webshare proxy path.
- * Jooble discover goes through scrapeJoobleLocal → local-browser-manager → host Chrome.
+ * P0 guarantees:
+ *   - Worker concurrency is configurable but defaults to 1
+ *   - Page lifecycle is tracked by PageLifecycleTracker (semaphore-enforced)
+ *   - Every page is closed in finally (via withLocalPage)
+ *   - Lifecycle stats are logged after each task
  *
  * Entrypoint: `tsx src/queue/local-browser-worker.ts`
  */
@@ -24,13 +27,20 @@ import {
   withLocalPage,
   withSourceLease,
   destroyOnBreaker,
+  getLifecycleStats,
 } from "../browser/local-browser-manager.js";
 import { recordFailure, type FailureType } from "../browser/circuit-breaker.js";
 import { resolveApplyUrl } from "../domain/apply-discovery/apply-resolver.js";
 import { upsertApplyDiscovery } from "../repositories/apply-discovery-repository.js";
 import { scrapeJoobleLocal } from "../sources/jooble-local.js";
+import { getSourceConcurrency } from "../browser/source-concurrency.js";
 
 const log = createChildLogger({ module: "worker-local-browser" });
+
+const WORKER_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.LOCAL_BROWSER_WORKER_CONCURRENCY ?? "1", 10),
+);
 
 async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void> {
   const runId = await createCrawlRun({ taskType: "discover_jobs", source: "jooble" });
@@ -89,6 +99,7 @@ async function handleJoobleDiscover(payload: DiscoverJobsPayload): Promise<void>
 }
 
 async function handleResolveApply(payload: ResolveApplyPayload): Promise<void> {
+  const sourceConfig = getSourceConcurrency(payload.source);
   const runId = await createCrawlRun({
     taskType: "resolve_apply",
     source: payload.source,
@@ -98,7 +109,9 @@ async function handleResolveApply(payload: ResolveApplyPayload): Promise<void> {
   try {
     await withSourceLease(payload.source, "local-browser-worker", async () => {
       const result = await withLocalPage(payload.source, async (page) => {
-        return resolveApplyUrl(page, payload.applyUrl, payload.source);
+        return resolveApplyUrl(page, payload.applyUrl, payload.source, {
+          timeoutMs: sourceConfig.navigationTimeoutMs,
+        });
       });
 
       await upsertApplyDiscovery(
@@ -150,12 +163,26 @@ async function processJob(job: Job<CommandPayload>): Promise<void> {
     default:
       throw new Error(`Unexpected command type for local browser worker: ${payload.type}`);
   }
+
+  // P0: Log lifecycle stats after every task
+  const stats = getLifecycleStats();
+  log.info(
+    {
+      openPages: stats.pages.openPages,
+      closedPages: stats.pages.closedPages,
+      leakedPages: stats.pages.leakedPages,
+      highWaterMark: stats.pages.highWaterMark,
+      rssMB: Math.round(stats.pages.lastMemoryRss / 1024 / 1024),
+      browserAlive: stats.browser.alive,
+    },
+    "Post-task lifecycle stats",
+  );
 }
 
 export function startLocalBrowserWorker(): Worker<CommandPayload> {
   const worker = new Worker<CommandPayload>(QUEUE_NAMES.localBrowser, processJob, {
     connection: getRedisConnection(),
-    concurrency: 1,
+    concurrency: WORKER_CONCURRENCY,
   });
 
   worker.on("completed", (job) => {
@@ -164,9 +191,26 @@ export function startLocalBrowserWorker(): Worker<CommandPayload> {
 
   worker.on("failed", (job, err) => {
     log.error({ jobId: job?.id, err: err.message }, "Failed");
+    // P0: Log lifecycle stats on failure too
+    const stats = getLifecycleStats();
+    log.warn(
+      {
+        openPages: stats.pages.openPages,
+        leakedPages: stats.pages.leakedPages,
+        rssMB: Math.round(stats.pages.lastMemoryRss / 1024 / 1024),
+      },
+      "Post-failure lifecycle stats",
+    );
   });
 
-  log.info({ concurrency: 1 }, "Local browser worker started (host process)");
+  log.info(
+    {
+      concurrency: WORKER_CONCURRENCY,
+      maxOpenPages: parseInt(process.env.MAX_OPEN_PAGES ?? "3", 10),
+      maxOpenPagesPerSource: parseInt(process.env.MAX_OPEN_PAGES_PER_SOURCE ?? "2", 10),
+    },
+    "Local browser worker started (host process) with lifecycle tracking",
+  );
   return worker;
 }
 

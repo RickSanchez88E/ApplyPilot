@@ -19,6 +19,7 @@ import { payloadHash } from "../domain/dedup/content-hash.js";
 import { shouldSnapshot } from "../domain/dedup/snapshot-policy.js";
 import { upsertJob } from "../repositories/jobs-repository.js";
 import { insertSnapshot } from "../repositories/snapshot-repository.js";
+import { enqueueResolveApplyForJob } from "../domain/apply-discovery/dispatch.js";
 
 const log = createChildLogger({ module: "dedup" });
 
@@ -164,6 +165,23 @@ export async function dedupAndInsert(jobs: ReadonlyArray<NewJob>): Promise<Dedup
               jdRaw: job.jdRaw.slice(0, 2000),
             },
           });
+        }
+
+        const contentChanged = Boolean(upsertResult.previousHash && upsertResult.previousHash !== pHash);
+        if (upsertResult.isNew || contentChanged) {
+          try {
+            await enqueueResolveApplyForJob({
+              jobKey,
+              source: job.source,
+              applyUrl: job.applyUrl,
+              sourceDescUrl: job.sourceUrl ?? job.linkedinUrl,
+            });
+          } catch (err) {
+            log.warn(
+              { err, source: job.source, jobKey },
+              "Auto dispatch resolve_apply failed (non-fatal)",
+            );
+          }
         }
       } catch (err) {
         log.warn({ err, source: job.source, title: job.jobTitle }, "Dual-write to jobs_current failed (non-fatal)");
