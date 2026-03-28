@@ -17,6 +17,7 @@ import { chromium, type Page } from "playwright";
 import { createChildLogger } from "../lib/logger.js";
 import { listWebshareBrowserProxies, type BrowserProxyConfig } from "../lib/webshare.js";
 import { getConfig } from "../shared/config.js";
+import { appendLog } from "../lib/progress.js";
 
 const log = createChildLogger({ module: "jooble-browser" });
 
@@ -591,6 +592,7 @@ async function launchProxyBrowser(
       await page.waitForTimeout(15_000);
     }
     log.info({ proxy: proxy.server, user: proxy.username }, "Proxy warmup OK");
+    appendLog("success", `Jooble: proxy ${proxy.username} connected`);
     return { browser, ctx, page };
   } catch (err) {
     log.warn({ err, proxy: proxy.server, user: proxy.username }, "Proxy not reachable, skipping");
@@ -623,6 +625,7 @@ async function resolveApplyUrlsViaProxy(
 
   if (!session) {
     log.warn({ tried: proxies.length }, "All proxy slots failed, no apply URLs resolved via proxy");
+    appendLog("error", `Jooble: all ${proxies.length} proxy slots unreachable`);
     return resolved;
   }
 
@@ -695,6 +698,11 @@ async function resolveApplyUrlsViaProxy(
   }
 
   log.info({ resolved: resolved.size, total: Math.min(maxDesc, cards.length) }, "Proxy apply URL batch complete");
+  if (resolved.size > 0) {
+    appendLog("success", `Jooble: ${resolved.size}/${Math.min(maxDesc, cards.length)} external apply URLs resolved`);
+  } else {
+    appendLog("warn", `Jooble: no external apply URLs resolved (${Math.min(maxDesc, cards.length)} tried)`);
+  }
   return resolved;
 }
 
@@ -712,6 +720,7 @@ export async function scrapeJoobleForKeyword(
     const searchUrl = `https://jooble.org/SearchResult?rgns=${encodeURIComponent(location)}&ukw=${encodeURIComponent(keyword)}&p=${pageNum}`;
 
     log.info({ keyword, page: pageNum, maxPages: MAX_PAGES, cardsCollected: allCards.length }, "Loading search page");
+    appendLog("info", `Jooble「${keyword}」: search page ${pageNum}…`);
 
     const { page, blocked, html } = await navigateWithCf(searchUrl, { timeoutMs: 30_000 });
 
@@ -757,14 +766,17 @@ export async function scrapeJoobleForKeyword(
   const maxDesc = Math.min(cardsToProcess.length, getMaxDescFetchesPerKeyword());
   const delayMs = getDescFetchDelayMs();
 
-  // Attempt to get Webshare proxies for /desc/ phase — saves local IP from CF blocks
+  appendLog("info", `Jooble「${keyword}」: ${allCards.length} cards, resolving apply URLs…`);
+
   let proxies: BrowserProxyConfig[] = [];
   const hasWebshareKey = !!getConfig().webshareApiKey;
   if (hasWebshareKey) {
     try {
       proxies = await listWebshareBrowserProxies(5);
+      appendLog("info", `Jooble: ${proxies.length} proxy slots available`);
     } catch (err) {
       log.warn({ err }, "Webshare proxies unavailable, falling back to local CDP");
+      appendLog("warn", "Jooble: proxy unavailable, using local CDP");
     }
   }
 

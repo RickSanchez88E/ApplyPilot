@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 
+export interface ProgressLogEntry {
+  ts: number;
+  level: 'info' | 'warn' | 'error' | 'success';
+  msg: string;
+}
+
 export interface ProgressState {
   stage: string;
   current: number;
@@ -15,6 +21,7 @@ export interface ProgressState {
     jobsSkipped: number;
     errors: number;
   };
+  logs: ProgressLogEntry[];
 }
 
 /**

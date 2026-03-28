@@ -4,6 +4,8 @@
  * Progress flows:
  *   idle → initializing → checking_session → scraping_page(1..N) →
  *   parsing_details(1..M) → ats_enhancement → dedup_insert → completed | error
+ *
+ * Includes a rolling activity log so the frontend can show detailed steps.
  */
 
 import { EventEmitter } from "node:events";
@@ -19,22 +21,23 @@ export type ProgressStage =
   | "completed"
   | "error";
 
+export interface ProgressLogEntry {
+  ts: number;
+  level: "info" | "warn" | "error" | "success";
+  msg: string;
+}
+
 export interface ProgressState {
   stage: ProgressStage;
-  /** Current step within the stage (e.g., page 2 of 3) */
   current: number;
-  /** Total expected steps in the stage */
   total: number;
-  /** Overall percentage 0-100 */
   percent: number;
-  /** Human-readable message */
   message: string;
-  /** Current keyword being processed */
   keyword: string;
-  /** Timestamp of last update */
   updatedAt: number;
-  /** Accumulated stats for this run */
   stats: RunStats;
+  /** Rolling activity log (newest last, capped at MAX_LOG_ENTRIES) */
+  logs: ProgressLogEntry[];
 }
 
 export interface RunStats {
@@ -45,6 +48,7 @@ export interface RunStats {
   errors: number;
 }
 
+const MAX_LOG_ENTRIES = 80;
 const emitter = new EventEmitter();
 
 let state: ProgressState = createIdleState();
@@ -59,6 +63,7 @@ function createIdleState(): ProgressState {
     keyword: "",
     updatedAt: Date.now(),
     stats: { pagesScraped: 0, jobsParsed: 0, jobsInserted: 0, jobsSkipped: 0, errors: 0 },
+    logs: [],
   };
 }
 
@@ -71,8 +76,20 @@ export function resetProgress(): void {
   emitter.emit("progress", state);
 }
 
-export function updateProgress(patch: Partial<Omit<ProgressState, "updatedAt">>): void {
+export function updateProgress(patch: Partial<Omit<ProgressState, "updatedAt" | "logs">>): void {
   state = { ...state, ...patch, updatedAt: Date.now() };
+  emitter.emit("progress", state);
+}
+
+/** Append a human-readable log entry + optionally update message/stage. */
+export function appendLog(
+  level: ProgressLogEntry["level"],
+  msg: string,
+  patch?: Partial<Omit<ProgressState, "updatedAt" | "logs">>,
+): void {
+  const entry: ProgressLogEntry = { ts: Date.now(), level, msg };
+  const logs = [...state.logs, entry].slice(-MAX_LOG_ENTRIES);
+  state = { ...state, ...patch, logs, message: msg, updatedAt: Date.now() };
   emitter.emit("progress", state);
 }
 

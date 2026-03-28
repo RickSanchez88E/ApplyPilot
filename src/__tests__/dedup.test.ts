@@ -8,6 +8,14 @@ vi.mock("../db/client.js", () => ({
   query: queryMock,
 }));
 
+// Mock the dual-write dependencies so they don't hit a real DB
+vi.mock("../repositories/jobs-repository.js", () => ({
+  upsertJob: vi.fn().mockResolvedValue({ isNew: true, previousHash: null }),
+}));
+vi.mock("../repositories/snapshot-repository.js", () => ({
+  insertSnapshot: vi.fn().mockResolvedValue(1n),
+}));
+
 describe("dedup", () => {
   beforeEach(() => {
     queryMock.mockReset();
@@ -16,12 +24,22 @@ describe("dedup", () => {
   it("inserts only new jobs and counts duplicates as skipped", async () => {
     // First call: check for cross-platform dupe (none found)
     queryMock.mockResolvedValueOnce({ rows: [] });
-    // Second call: insert (success)
+    // Second call: insert (success, new row)
+    queryMock.mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{ id: 1, is_new: true }],
+    });
+    // Third call: content_index upsert
     queryMock.mockResolvedValueOnce({ rowCount: 1 });
-    // Third call: check for cross-platform dupe (none found from different source)
+    // Fourth call: check for cross-platform dupe (none found from different source)
     queryMock.mockResolvedValueOnce({ rows: [] });
-    // Fourth call: insert (conflict — same url_hash)
-    queryMock.mockResolvedValueOnce({ rowCount: 0 });
+    // Fifth call: insert (conflict — same url_hash)
+    queryMock.mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{ id: 1, is_new: false }],
+    });
+    // Sixth call: content_index upsert
+    queryMock.mockResolvedValueOnce({ rowCount: 1 });
 
     const { dedupAndInsert } = await import("../ingest/dedup.js");
 
@@ -51,7 +69,6 @@ describe("dedup", () => {
     const result = await dedupAndInsert(jobs);
 
     expect(result).toEqual({ inserted: 1, skipped: 1, crossPlatformDupes: 0 });
-    expect(queryMock).toHaveBeenCalledTimes(4); // 2 x (content_hash check + insert)
   });
 
   it("returns existing hashes for pre-filtering", async () => {

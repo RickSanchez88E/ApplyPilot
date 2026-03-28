@@ -6,6 +6,7 @@
  *   2. content_hash: cross-platform linking (same company+title = link in content_index)
  *
  * Each source inserts into its own schema: src_linkedin.jobs, src_reed.jobs, etc.
+ * Phase 1 dual-write: also upserts into public.jobs_current for lifecycle tracking.
  */
 
 import { query } from "../db/client.js";
@@ -13,6 +14,11 @@ import { createChildLogger } from "../lib/logger.js";
 import type { NewJob } from "../shared/types.js";
 import { hashUrl, contentHash } from "../lib/utils.js";
 import { sourceTable, CONTENT_INDEX_TABLE, JOBS_ALL_VIEW } from "../db/schema-router.js";
+import { buildJobKey } from "../domain/dedup/job-key.js";
+import { payloadHash } from "../domain/dedup/content-hash.js";
+import { shouldSnapshot } from "../domain/dedup/snapshot-policy.js";
+import { upsertJob } from "../repositories/jobs-repository.js";
+import { insertSnapshot } from "../repositories/snapshot-repository.js";
 
 const log = createChildLogger({ module: "dedup" });
 
@@ -117,6 +123,50 @@ export async function dedupAndInsert(jobs: ReadonlyArray<NewJob>): Promise<Dedup
            ON CONFLICT (content_hash, source) DO UPDATE SET source_job_id = $3, source_url = $4`,
           [cHash, job.source, insertedId, job.sourceUrl ?? primaryUrl, job.companyName, job.jobTitle],
         );
+      }
+
+      // Dual-write to jobs_current
+      try {
+        const jobKey = buildJobKey(job.source, {
+          sourceUrl: job.sourceUrl,
+          linkedinUrl: job.linkedinUrl,
+        });
+        const pHash = payloadHash(
+          job.companyName,
+          job.jobTitle,
+          job.jdRaw,
+          job.location,
+        );
+        const upsertResult = await upsertJob({
+          jobKey,
+          source: job.source,
+          canonicalUrl: job.sourceUrl ?? job.linkedinUrl,
+          title: job.jobTitle,
+          company: job.companyName,
+          location: job.location,
+          workMode: job.workMode,
+          salaryText: job.salaryText,
+          postedAt: postedDate,
+          contentHash: pHash,
+          applyUrl: job.applyUrl,
+          atsPlatform: job.atsPlatform,
+          jdRaw: job.jdRaw,
+        });
+
+        if (!upsertResult.isNew && upsertResult.previousHash && shouldSnapshot(upsertResult.previousHash, pHash)) {
+          await insertSnapshot({
+            jobKey,
+            contentHash: pHash,
+            payload: {
+              title: job.jobTitle,
+              company: job.companyName,
+              location: job.location,
+              jdRaw: job.jdRaw.slice(0, 2000),
+            },
+          });
+        }
+      } catch (err) {
+        log.warn({ err, source: job.source, title: job.jobTitle }, "Dual-write to jobs_current failed (non-fatal)");
       }
     }
   }

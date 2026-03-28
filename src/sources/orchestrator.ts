@@ -6,7 +6,7 @@
  */
 import { createChildLogger } from "../lib/logger.js";
 import { dedupAndInsert, type DedupResult } from "../ingest/dedup.js";
-import { updateProgress, incrementStat } from "../lib/progress.js";
+import { incrementStat, appendLog } from "../lib/progress.js";
 import type { SourceAdapter, FetchOptions } from "./adapter.js";
 import type { NewJob } from "../shared/types.js";
 
@@ -71,20 +71,22 @@ export async function runMultiSourceScrape(
     "Starting multi-source scrape",
   );
 
-  updateProgress({
+  const sourceNames = adapters.map((a) => a.displayName).join(", ");
+  appendLog("info", `Starting: ${sourceNames}`, {
     stage: "scraping_page",
     percent: 10,
-    message: `Fetching from ${adapters.length} sources...`,
   });
 
   const cutoffDate = maxAgeDays
     ? new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000)
     : null;
 
+  const completedSources = new Set<string>();
   const results = await Promise.allSettled(
     adapters.map(async (adapter) => {
       const sourceStart = Date.now();
       try {
+        appendLog("info", `⟳ ${adapter.displayName}: fetching…`);
         log.info({ source: adapter.name }, `Fetching from ${adapter.displayName}...`);
         const jobs = await adapter.fetchJobs(keywords, location, fetchOptions);
 
@@ -115,6 +117,7 @@ export async function runMultiSourceScrape(
           }
         }
 
+        const dur = ((Date.now() - sourceStart) / 1000).toFixed(1);
         log.info(
           {
             source: adapter.name,
@@ -124,9 +127,15 @@ export async function runMultiSourceScrape(
           `${adapter.displayName}: ${filteredJobs.length} jobs fetched`,
         );
 
+        completedSources.add(adapter.name);
+        const pct = 10 + Math.round((completedSources.size / adapters.length) * 55);
+        appendLog("success", `✓ ${adapter.displayName}: ${filteredJobs.length} jobs (${dur}s)`, { percent: pct });
+
         return { source: adapter.name, jobs: filteredJobs };
       } catch (err) {
         log.error({ err, source: adapter.name }, `${adapter.displayName} failed`);
+        completedSources.add(adapter.name);
+        appendLog("error", `✗ ${adapter.displayName}: failed — ${err instanceof Error ? err.message : "unknown"}`);
         return { source: adapter.name, jobs: [] as NewJob[] };
       }
     }),
@@ -144,10 +153,9 @@ export async function runMultiSourceScrape(
   const totalFetched = allJobs.length;
   log.info({ totalFetched, sources: Object.keys(bySource) }, "All sources fetched");
 
-  updateProgress({
+  appendLog("info", `⟳ Deduplicating ${totalFetched} jobs…`, {
     stage: "dedup_insert",
     percent: 70,
-    message: `Deduplicating and inserting ${totalFetched} jobs from ${adapters.length} sources...`,
   });
 
   let dedupResult: DedupResult = { inserted: 0, skipped: 0, crossPlatformDupes: 0 };
@@ -157,19 +165,21 @@ export async function runMultiSourceScrape(
     incrementStat("jobsSkipped", dedupResult.skipped);
   }
 
-  updateProgress({
+  appendLog("success", `✓ Dedup: ${dedupResult.inserted} new, ${dedupResult.skipped} skipped, ${dedupResult.crossPlatformDupes} cross-platform dupes`);
+
+  appendLog("info", "⟳ Syncing GOV.UK Visa Sponsor list…", {
     stage: "ats_enhancement",
     percent: 85,
-    message: "Syncing GOV.UK Visa Sponsor list...",
   });
 
   const sponsorSync = await syncSponsorList();
   const durationMs = Date.now() - startTime;
 
-  updateProgress({
+  appendLog("success", `✓ Sponsor sync: ${sponsorSync.jobsUpdated} jobs updated`);
+
+  appendLog("success", `Done: ${dedupResult.inserted} new jobs from ${adapters.length} sources (${(durationMs / 1000).toFixed(1)}s)`, {
     stage: "completed",
     percent: 100,
-    message: `Multi-source complete: ${dedupResult.inserted} new jobs from ${adapters.length} sources (${(durationMs / 1000).toFixed(1)}s)`,
   });
 
   log.info(

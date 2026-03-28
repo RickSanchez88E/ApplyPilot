@@ -271,9 +271,156 @@ PostgreSQL: job_orchestrator (port 5433)
 - [x] **Fix 2**: `catch` 块追加 `updateProgress({ stage: "error", message })` 确保前端收到错误态
 - [x] **Fix 3**: `ProgressBar.tsx` 增加 8 秒 auto-dismiss（completed/error 后自动隐藏）
 
-### 后续待办
-- [ ] **路由层提取**：从 `server.ts` 提取路由到 `src/routes/` 目录
+### 后续待办（UI）
 - [ ] 表格排序方向指示器（`▲/▼` 替代 `↕`）
 - [ ] Start/Stop 按钮颜色进一步克制
 - [ ] 移动端 responsive 验证
+
+---
+
+## v3.0: 抓取域重构 — 岗位状态机 + 过期判定 + 命令队列 + 多容器隔离
+
+### 架构决策（已定案，2026-03-27）
+
+- 保留 Node.js / TypeScript 主栈，不引入 Python/Celery
+- PostgreSQL 唯一真相源，Redis + BullMQ 队列
+- 不设计投递/申请/表单执行层
+- 短期保留 `src_*` schema 兼容层，中期以 `jobs_current` 为岗位真相表
+
+### 目标容器划分
+
+| 容器 | 职责 | 基础镜像 |
+|------|------|---------|
+| postgres | 唯一数据源 | postgres:16-alpine |
+| redis | BullMQ 队列 + progress pub/sub | redis:7-alpine |
+| api | Express API + 前端静态 + 入队（不跑抓取） | node:22-alpine |
+| scheduler | cron 定时创建命令（不写业务表） | node:22-alpine |
+| worker-general | 轻任务：discover(API源)/verify/dedup/snapshot/expiry | node:22-alpine |
+| worker-browser | 重任务：LinkedIn CDP/Jooble CF-bypass/浏览器 verify | node:22-bookworm-slim + Chrome |
+
+### 核心新增表
+
+- `jobs_current` — 岗位标准化真相（job_key UNIQUE, job_status 枚举）
+- `job_snapshots` — 内容变化才写
+- `crawl_runs` — 每次命令执行记录（task_type, source, evidence_summary 等）
+- `source_cursors` — 分页游标与进度跟踪
+
+### 岗位可用性状态
+
+```
+active → suspected_expired → expired
+active → blocked (CF/authwall/proxy)
+active → fetch_failed (网络错误，可重试)
+suspected_expired → active (恢复)
+blocked → active (解封后)
+```
+
+### 命令队列
+
+| 命令 | 路由 |
+|------|------|
+| discover_jobs | browser(LinkedIn/Jooble) / general(其他) |
+| verify_job | browser(需浏览器) / general(HTTP) |
+| enrich_job | browser(Jooble /desc/) / general |
+| recheck_expiry | general（调度 verify 子命令） |
+| refresh_source_cursor | general |
+
+### 过期判定（独立模块，不再 DELETE）
+
+| 平台 | 策略要点 |
+|------|---------|
+| Reed | 404/410 → expired；timeout → fetch_failed |
+| Jooble | CF 页面 → blocked（不是 expired）；"no longer available" → expired |
+| LinkedIn | authwall → blocked；404 非 authwall → expired |
+| Generic (HN/RemoteOK/DevITJobs) | 单次 missing → suspected；连续 ≥3 → expired |
+
+### 模块目录
+
+```
+src/
+├── api/           ← HTTP 路由 + DTO（从 server.ts 提取）
+├── queue/         ← 命令定义 + worker 注册 + processors
+├── domain/
+│   ├── job-lifecycle/  ← 状态机 + 迁移规则
+│   ├── expiry/         ← 判定器 + 4 平台策略
+│   └── dedup/          ← job_key + content_hash + snapshot policy
+├── repositories/  ← jobs_current / snapshots / crawl_runs / cursors
+├── workflows/     ← discover → verify → snapshot → recheck 编排
+├── sources/       ← adapter 不变 + linkedin/ 从 ingest/ 迁入
+├── scheduler/     ← node-cron 入口
+├── lib/           ← + redis.ts, progress.ts 改 Redis pub/sub
+├── shared/        ← 不变
+└── db/            ← + 005_job_lifecycle_tables.sql
+```
+
+### Phase 1: 数据模型 + 状态语义 ✅ (2026-03-27)
+- [x] `005_job_lifecycle_tables.sql`: jobs_current, job_snapshots, crawl_runs, source_cursors
+- [x] `src/domain/dedup/job-key.ts` + `content-hash.ts` + `snapshot-policy.ts`
+- [x] `src/domain/job-lifecycle/job-status.ts` + `transitions.ts`
+- [x] `src/repositories/jobs-repository.ts` + `snapshot-repository.ts` + `crawl-run-repository.ts`
+- [x] 修改 `dedup.ts::dedupAndInsert` 双写 `jobs_current`
+- [x] **TDD**: 40/40 passed — job-key / content-hash / snapshot-policy / transitions
+- [ ] 存量数据回填脚本（Phase 1b，可后续执行）
+
+### Phase 2: 过期判定模块 ✅ (2026-03-27)
+- [x] `src/domain/expiry/types.ts` + `expiry-judge.ts` + `evidence-collector.ts`
+- [x] 4 个平台策略: `reed-strategy` / `jooble-strategy` / `linkedin-strategy` / `generic-feed-strategy`
+- [x] **TDD**: 26/26 passed — 4 strategy classify + ExpiryJudge routing
+- [ ] `src/workflows/recheck-workflow.ts`（Phase 2b，需接入 worker processor）
+- [ ] 重构 `dead-letter.ts` → 不再 DELETE，改状态迁移（Phase 2b）
+
+### Phase 3: 引入队列和 worker ✅ (2026-03-27)
+- [x] `pnpm add bullmq ioredis` + `src/lib/redis.ts`
+- [x] `src/queue/commands.ts` + `setup.ts` (dispatch helper + routing)
+- [x] `src/queue/general-worker.ts` + `browser-worker.ts` (placeholder processors)
+- [x] `src/scheduler/index.ts` (interval-based dispatch)
+- [x] **TDD**: 10/10 passed — command routing + queue names
+- [ ] 接入真实 adapter 到 processor（Phase 3b）
+- [ ] 重构 `progress.ts` → Redis pub/sub（Phase 3b）
+- [ ] 重构 `server.ts` → trigger 改为入队（Phase 3b）
+
+### Phase 4: Docker 拆容器 ✅ (2026-03-27)
+- [x] `Dockerfile.api` (node:22-alpine, no browser)
+- [x] `Dockerfile.worker` (node:22-alpine, general + scheduler)
+- [x] `Dockerfile.browser` (node:22-bookworm-slim + Chrome)
+- [x] `docker-compose.yml` — 6 容器 (postgres / redis / api / scheduler / worker-general / worker-browser)
+- [x] `docker compose config` 验证通过
+- [ ] **SDD**: 实际 build + 冷启动验证（需 Docker daemon 运行）
+
+### 验收修复轮 (2026-03-28)
+- [x] **P0-1**: upsertJob previousHash 修复为 CTE 先读旧值（snapshot 判定现在基于真实旧 hash）
+- [x] **P0-2**: discover_jobs / recheck_expiry worker 接通真实 adapter + expiry judge
+- [x] **P0-2**: 未实现命令 (verify_job / enrich_job / refresh_source_cursor) 改为 throw Error（fail fast）
+- [x] **P0-3**: server.ts trigger/multi 改为 dispatch-only（不再同步执行抓取）
+- [x] **P0-4**: dead-letter DELETE 路径已完全断开，API 改为 `/api/jobs/recheck-expiry` dispatch 新路径
+- [x] **P1-1**: transitionStatus 返回 `{ updated: boolean }`，from 不匹配时不再静默
+- [x] **P1-2**: scheduler dispatchExpiryChecks 真实实现（查询 suspected_expired / stale active / cooled blocked）
+- [x] **P1-3**: Docker compose 资源限制改为 mem_limit/cpus（普通 compose 直接生效）
+
+### 缺陷修复轮 #2 (2026-03-28)
+- [x] **缺陷 1**: timeFilter 映射修复 — `resolveMaxAgeDays()` 将 `r86400`/`r604800`/`r2592000` 正确映射为 1/7/30 天，不再 `Number("r86400")` → NaN
+- [x] **缺陷 2**: 前端 trigger 流适配 — 移除 `isScraping` 依赖和完成轮询，改为 dispatch 后立即反馈入队数量
+- [x] **缺陷 3**: recheck_expiry crawl_run 状态准确性 — `updated=false` 时记为 `cancelled` 而非 `completed`，区分 no_change / 迁移成功 / 迁移期望但未生效
+
+### v3.1 前端平台化 + Docker 部署 (2026-03-28)
+- [x] **前端重构为平台化 tabs**: 顶部 navbar 7 个 tab (Overview / LinkedIn / Reed / Jooble / DevITJobs / HN Hiring / RemoteOK)
+- [x] **每平台独立面板**: 独立 trigger、stats、jobs table、progress/crawl runs
+- [x] **Overview 总览页**: KPI 汇总 + source 分布 + duplicates + latest run per source
+- [x] **Progress 按平台分离**: 每个平台页显示自己的 crawl_runs 历史，Overview 显示各平台最近一次 run
+- [x] **新增 API 端点**: `GET /api/crawl-runs/latest?source=X`, `POST /api/trigger/source/:source`
+- [x] **BullMQ 队列名修复**: `worker:general` → `worker-general` (BullMQ v5 禁止 `:`)
+- [x] **旧容器清理 + 6 容器部署**: postgres, redis, api, scheduler, worker-general, worker-browser 全部运行
+- [x] **Worker 集成验证通过**: 
+  - Reed dispatch → worker-general → crawl_runs completed (400 found, 79 inserted)
+  - LinkedIn dispatch → worker-browser → crawl_runs completed (2 inserted)
+  - Scheduler 自动 dispatch 6 sources → 全部执行
+  - 1048 总 jobs 跨 6 sources
+- [x] 移除旧 SourceFilters sidebar, ScrapeControls 多选模式
+- [x] 126 tests pass, tsc 0 errors
+
+### 后续待办（v3.0 剩余）
+- [ ] verify_job / enrich_job processor 真实实现
+- [ ] progress.ts 重构为 Redis pub/sub（跨容器 SSE 实时进度）
+- [ ] 存量数据回填 jobs_current
+- [ ] 前端 e2e 测试
 

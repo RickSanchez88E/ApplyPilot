@@ -36,11 +36,13 @@
   "author": "Hongyi Tu",
   "license": "MIT",
   "dependencies": {
+    "bullmq": "^5.71.1",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "https-proxy-agent": "^8.0.0",
+    "ioredis": "^5.10.1",
     "pg": "^8.20.0",
     "pino": "^10.3.1",
     "playwright": "^1.58.2",

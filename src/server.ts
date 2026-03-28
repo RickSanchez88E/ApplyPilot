@@ -1,17 +1,16 @@
-import type { BatchResult } from "./index.js";
-import { startScraper } from "./index.js";
 import { query } from "./db/client.js";
-import { runMultiSourceScrape, getAdapterCapabilities } from "./sources/orchestrator.js";
+import { getAdapterCapabilities } from "./sources/orchestrator.js";
 import { getConfig, TIME_FILTER_PRESETS } from "./shared/config.js";
 import { getScraperConfig, setScraperKeywords, setScraperLocation } from "./db/config-db.js";
-import { runDeadLetterScan } from "./db/dead-letter.js";
+import { dispatch } from "./queue/setup.js";
+import { routeCommand } from "./queue/commands.js";
 import { sourceTable, JOBS_ALL_VIEW, ALL_SOURCE_NAMES, CONTENT_INDEX_TABLE } from "./db/schema-router.js";
 import express from "express";
 import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createChildLogger } from "./lib/logger.js";
-import { getProgress, onProgress, offProgress, updateProgress, resetProgress, type ProgressState } from "./lib/progress.js";
+import { getProgress, onProgress, offProgress, type ProgressState } from "./lib/progress.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,20 +22,13 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
-let isScraping = false;
-let lastScrapeResult: BatchResult | null = null;
-let currentSchedule: ReturnType<typeof setInterval> | null = null;
-let nextRunAt: Date | null = null;
 const serverStartedAt = Date.now();
 
 // ── Status ────────────────────────────────────────────────────
 app.get("/api/status", (_req, res) => {
   res.json({
-    isScraping,
-    scheduleActive: currentSchedule !== null,
-    nextRunAt,
+    mode: "queue",
     progress: getProgress(),
-    lastResult: lastScrapeResult,
   });
 });
 
@@ -56,8 +48,7 @@ app.get("/api/health", async (_req, res) => {
         heapTotalMB: Math.round(mem.heapTotal / 1048576),
         rssMB: Math.round(mem.rss / 1048576),
       },
-      isScraping,
-      scheduleActive: currentSchedule !== null,
+      mode: "queue",
     });
   } catch (err) {
     res.status(503).json({
@@ -147,17 +138,46 @@ app.put("/api/config/keywords", async (req, res) => {
   }
 });
 
-// ── Dead Letter Queue: Expired Job Cleanup ────────────────────
-app.post("/api/dead-letter/scan", async (req, res) => {
-  const batchSize = Number(req.body?.batchSize) || 50;
+// ── Expiry Recheck (replaces old dead-letter DELETE path) ─────
+app.post("/api/jobs/recheck-expiry", async (req, res) => {
+  const batchSize = Math.min(Number(req.body?.batchSize) || 50, 200);
   const sources = req.body?.sources as string[] | undefined;
+
   try {
-    log.info({ batchSize, sources }, "Starting dead letter scan");
-    const result = await runDeadLetterScan(batchSize, sources);
-    res.json(result);
+    const sourceFilter = sources && sources.length > 0
+      ? `AND source = ANY($2::text[])`
+      : "";
+    const params: unknown[] = [batchSize];
+    if (sources && sources.length > 0) params.push(sources);
+
+    const candidates = await query<{ job_key: string; source: string }>(
+      `SELECT job_key, source FROM public.jobs_current
+       WHERE (
+         job_status = 'suspected_expired'
+         OR (job_status = 'active' AND last_seen_at < NOW() - INTERVAL '48 hours')
+         OR (job_status = 'blocked' AND last_evidence_at < NOW() - INTERVAL '6 hours')
+       ) ${sourceFilter}
+       ORDER BY last_seen_at ASC NULLS FIRST
+       LIMIT $1`,
+      params,
+    );
+
+    const dispatched: { jobKey: string; source: string; queue: string; jobId: string }[] = [];
+    for (const row of candidates.rows) {
+      const payload = { type: "recheck_expiry" as const, jobKey: row.job_key, source: row.source };
+      const queue = routeCommand(payload);
+      const jobId = await dispatch(payload);
+      dispatched.push({ jobKey: row.job_key, source: row.source, queue, jobId });
+    }
+
+    res.json({
+      dispatched: dispatched.length,
+      candidates: candidates.rows.length,
+      commands: dispatched,
+    });
   } catch (err) {
-    log.error({ err }, "Dead letter scan failed");
-    res.status(500).json({ error: "Dead letter scan failed" });
+    log.error({ err }, "Expiry recheck dispatch failed");
+    res.status(500).json({ error: "Expiry recheck dispatch failed" });
   }
 });
 
@@ -188,165 +208,118 @@ app.get("/api/progress/stream", (req, res) => {
   });
 });
 
-// ── LinkedIn Trigger (with time filter) ───────────────────────
+// ── LinkedIn Trigger (dispatch to browser queue) ──────────────
 app.post("/api/trigger", async (req, res) => {
-  if (isScraping) {
-    return res.status(400).json({ error: "Scraping already in progress" });
-  }
-
-  isScraping = true;
-  resetProgress();
   const { timeFilter } = req.body ?? {};
-  res.json({ status: "started", timeFilter: timeFilter ?? "multi-pass" });
-
   try {
-    log.info({ timeFilter }, "API triggered LinkedIn scrape batch");
-    const result = await startScraper({ force: true, timeFilter });
-    lastScrapeResult = result;
+    const payload = { type: "discover_jobs" as const, source: "linkedin", timeFilter };
+    const queue = routeCommand(payload);
+    const jobId = await dispatch(payload);
+    res.json({ status: "dispatched", queue, jobId, source: "linkedin", timeFilter });
   } catch (err) {
-    log.error({ err }, "API triggered scrape failed");
-    updateProgress({
-      stage: "error",
-      percent: 0,
-      message: `Scrape failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-    });
-  } finally {
-    isScraping = false;
+    log.error({ err }, "Failed to dispatch LinkedIn trigger");
+    res.status(500).json({ error: "Failed to dispatch" });
   }
 });
 
 
-// ── Multi-Source Trigger ──────────────────────────────────────
+// ── Multi-Source Trigger (dispatch per source to queue) ───────
 app.post("/api/trigger/multi", async (req, res) => {
-  if (isScraping) {
-    return res.status(400).json({ error: "Scraping already in progress" });
-  }
-
-  isScraping = true;
-  resetProgress();
-
   try {
     const { sources, timeFilter } = req.body ?? {};
-
-    // REV-1: Validate time filter against source capabilities.
-    // Only pass timeFilter to sources that truly support it.
-    const caps = getAdapterCapabilities();
-    const requestedSources: string[] = sources ?? [];
-
-    const timeFilterMap: Record<string, number> = {
-      r86400: 1,         // 24 hours → 1 day
-      r604800: 7,        // 1 week → 7 days
-      r2592000: 30,      // 1 month → 30 days
-    };
-    const maxAgeDays = timeFilter ? timeFilterMap[timeFilter] : undefined;
-
-    // Split sources into time-supported and non-time-supported groups
-    const timeSupported = requestedSources.filter(s =>
-      caps.find(c => c.name === s)?.supportsNativeTimeFilter
-    );
-    const noTimeSupport = requestedSources.filter(s =>
-      !caps.find(c => c.name === s)?.supportsNativeTimeFilter
-    );
-
-    log.info(
-      { timeSupported, noTimeSupport, maxAgeDays, timeFilter },
-      "API triggered multi-source scrape (capability-aware)"
-    );
-
-    res.json({
-      status: "started",
-      mode: "multi-source",
-      timeFilterAppliedTo: maxAgeDays ? timeSupported : [],
-      noTimeFilter: maxAgeDays ? noTimeSupport : requestedSources,
-    });
-
-    // FIX (2026-03-26): All selected sources must ALWAYS execute.
-    // Previously, when timeFilter was not sent, timeSupported sources (Reed, Jooble)
-    // were silently skipped because of `timeSupported.length > 0 && maxAgeDays`.
-    //
-    // New logic:
-    // - If maxAgeDays is set: run timeSupported with it, run noTimeSupport without
-    // - If maxAgeDays is NOT set: run ALL sources together without any time filter
-    // Read keywords/location from DB (persistent config)
+    const config = getConfig();
     const scraperCfg = await getScraperConfig();
-    log.info({ keywords: scraperCfg.keywords, location: scraperCfg.location }, "Using DB config for scrape");
 
-    if (maxAgeDays) {
-      if (timeSupported.length > 0) {
-        const result1 = await runMultiSourceScrape(
-          scraperCfg.keywords,
-          scraperCfg.location,
-          timeSupported,
-          maxAgeDays,
-        );
-        log.info(result1, "Time-filtered sources complete");
-      }
-      if (noTimeSupport.length > 0) {
-        const result2 = await runMultiSourceScrape(
-          scraperCfg.keywords,
-          scraperCfg.location,
-          noTimeSupport,
-          undefined,
-        );
-        log.info(result2, "Non-time-filtered sources complete");
-      }
-    } else {
-      const result = await runMultiSourceScrape(
-        scraperCfg.keywords,
-        scraperCfg.location,
-        requestedSources.length > 0 ? requestedSources : undefined,
-        undefined,
-      );
-      log.info(result, "Multi-source scrape (full fetch) complete");
+    const requestedSources: string[] =
+      sources && sources.length > 0 ? sources : config.enabledSources;
+
+    const dispatched: { source: string; queue: string; jobId: string }[] = [];
+
+    for (const source of requestedSources) {
+      const payload = {
+        type: "discover_jobs" as const,
+        source,
+        keywords: scraperCfg.keywords,
+        location: scraperCfg.location,
+        timeFilter,
+      };
+      const queue = routeCommand(payload);
+      const jobId = await dispatch(payload);
+      dispatched.push({ source, queue, jobId });
     }
-  } catch (err) {
-    log.error({ err }, "Multi-source scrape failed");
-    updateProgress({
-      stage: "error",
-      percent: 0,
-      message: `Scrape failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+
+    log.info({ dispatched: dispatched.length, sources: requestedSources }, "Multi-source dispatch complete");
+    res.json({
+      status: "dispatched",
+      mode: "multi-source",
+      dispatched: dispatched.length,
+      commands: dispatched,
     });
-  } finally {
-    isScraping = false;
+  } catch (err) {
+    log.error({ err }, "Multi-source dispatch failed");
+    res.status(500).json({ error: "Multi-source dispatch failed" });
   }
 });
 
-// ── Schedule ──────────────────────────────────────────────────
-app.post("/api/schedule", (req, res) => {
-  const { action, intervalMs } = req.body;
-  if (action === "start") {
-    if (currentSchedule) clearInterval(currentSchedule);
-
-    const interval = intervalMs || 3600000;
-    currentSchedule = setInterval(async () => {
-      if (!isScraping) {
-        try {
-          isScraping = true;
-          resetProgress();
-          log.info("Scheduled trigger firing");
-          lastScrapeResult = await startScraper({ force: false });
-        } catch (e) {
-          log.error({ err: e }, "Scheduled scrape failed");
-          updateProgress({
-            stage: "error",
-            percent: 0,
-            message: `Scheduled scrape failed: ${e instanceof Error ? e.message : "Unknown error"}`,
-          });
-        } finally {
-          isScraping = false;
-          nextRunAt = new Date(Date.now() + interval);
-        }
-      }
-    }, interval);
-
-    nextRunAt = new Date(Date.now() + interval);
-    res.json({ status: "scheduled", nextRunAt });
-  } else {
-    if (currentSchedule) clearInterval(currentSchedule);
-    currentSchedule = null;
-    nextRunAt = null;
-    res.json({ status: "stopped" });
+// ── Per-source trigger (dispatch single source) ──────────────
+app.post("/api/trigger/source/:source", async (req, res) => {
+  const { source } = req.params;
+  const { timeFilter } = req.body ?? {};
+  try {
+    const scraperCfg = await getScraperConfig();
+    const payload = {
+      type: "discover_jobs" as const,
+      source,
+      keywords: scraperCfg.keywords,
+      location: scraperCfg.location,
+      timeFilter,
+    };
+    const queue = routeCommand(payload);
+    const jobId = await dispatch(payload);
+    log.info({ source, queue, jobId }, "Single-source dispatch");
+    res.json({ status: "dispatched", source, queue, jobId, timeFilter });
+  } catch (err) {
+    log.error({ err, source }, "Single-source dispatch failed");
+    res.status(500).json({ error: "Dispatch failed" });
   }
+});
+
+// ── Crawl runs (per-source recent history) ────────────────────
+app.get("/api/crawl-runs/latest", async (req, res) => {
+  try {
+    const source = req.query.source as string | undefined;
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+
+    const conditions: string[] = [];
+    const params: unknown[] = [limit];
+    if (source) {
+      conditions.push("source = $2");
+      params.push(source);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const result = await query(
+      `SELECT id::text, task_type, source, job_key, status, http_status, error_type,
+              evidence_summary, jobs_found, jobs_inserted, jobs_updated,
+              started_at, finished_at, duration_ms
+       FROM public.crawl_runs ${where}
+       ORDER BY started_at DESC
+       LIMIT $1`,
+      params,
+    );
+    res.json({ runs: result.rows });
+  } catch (err) {
+    log.error({ err }, "Failed to fetch crawl runs");
+    res.status(500).json({ error: "Failed to fetch crawl runs" });
+  }
+});
+
+// ── Schedule (delegates to queue — scheduler container handles the interval) ──
+app.post("/api/schedule", (_req, res) => {
+  res.json({
+    status: "info",
+    message: "Scheduling is managed by the scheduler container via queue dispatch. Use /api/trigger or /api/trigger/multi for on-demand runs.",
+  });
 });
 
 // ── Jobs (schema-aware, with sorting & time filters) ──────────
