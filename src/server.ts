@@ -11,6 +11,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createChildLogger } from "./lib/logger.js";
 import { getProgress, onProgress, offProgress, type ProgressState } from "./lib/progress.js";
+import { acquireLease, releaseLease, isLeaseHeld } from "./scheduler/source-lease.js";
+import { getBreakerState, forceResetBreaker, isSourceInCooldown } from "./browser/circuit-breaker.js";
+import { getApplyDiscoveryStats, getRecentApplyDiscoveries } from "./repositories/apply-discovery-repository.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -261,11 +264,38 @@ app.post("/api/trigger/multi", async (req, res) => {
   }
 });
 
-// ── Per-source trigger (dispatch single source) ──────────────
+// ── Per-source trigger (dispatch single source, acquires lease) ──
 app.post("/api/trigger/source/:source", async (req, res) => {
   const { source } = req.params;
-  const { timeFilter } = req.body ?? {};
+  const { timeFilter, force } = req.body ?? {};
   try {
+    const cooldown = await isSourceInCooldown(source);
+    if (cooldown && !force) {
+      const state = await getBreakerState(source);
+      return res.status(429).json({
+        error: "source_in_cooldown",
+        source,
+        cooldownUntil: state.cooldownUntil,
+        hint: "Pass force:true to override cooldown",
+      });
+    }
+
+    if (force && cooldown) {
+      await forceResetBreaker(source);
+      log.info({ source }, "Manual trigger force-reset breaker");
+    }
+
+    const lease = await acquireLease(source, "manual-trigger", 15 * 60 * 1000);
+    if (!lease) {
+      const existing = await isLeaseHeld(source);
+      return res.status(409).json({
+        error: "source_busy",
+        source,
+        currentHolder: existing?.holder,
+        expiresAt: existing?.expiresAt,
+      });
+    }
+
     const scraperCfg = await getScraperConfig();
     const payload = {
       type: "discover_jobs" as const,
@@ -276,8 +306,8 @@ app.post("/api/trigger/source/:source", async (req, res) => {
     };
     const queue = routeCommand(payload);
     const jobId = await dispatch(payload);
-    log.info({ source, queue, jobId }, "Single-source dispatch");
-    res.json({ status: "dispatched", source, queue, jobId, timeFilter });
+    log.info({ source, queue, jobId }, "Single-source dispatch (manual, lease acquired)");
+    res.json({ status: "dispatched", source, queue, jobId, timeFilter, leaseHolder: "manual-trigger" });
   } catch (err) {
     log.error({ err, source }, "Single-source dispatch failed");
     res.status(500).json({ error: "Dispatch failed" });
@@ -472,6 +502,102 @@ app.get("/api/jobs/duplicates", async (_req, res) => {
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch duplicates" });
+  }
+});
+
+// ── Schedule state (per-source) ───────────────────────────────
+app.get("/api/schedule/state", async (_req, res) => {
+  try {
+    const result = await query(
+      `SELECT source, interval_ms, last_dispatched_at, next_dispatch_at,
+              lease_holder, lease_acquired_at, lease_expires_at,
+              cooldown_until, cooldown_reason, consecutive_failures,
+              last_failure_at, enabled, updated_at
+       FROM public.source_schedule_state
+       ORDER BY source`,
+    );
+    res.json({ schedules: result.rows });
+  } catch (err) {
+    log.error({ err }, "Failed to fetch schedule state");
+    res.status(500).json({ error: "Failed to fetch schedule state" });
+  }
+});
+
+// ── Breaker state (per-source) ────────────────────────────────
+app.get("/api/breaker/:source", async (req, res) => {
+  try {
+    const state = await getBreakerState(req.params.source);
+    res.json(state);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get breaker state" });
+  }
+});
+
+app.post("/api/breaker/:source/reset", async (req, res) => {
+  try {
+    await forceResetBreaker(req.params.source);
+    res.json({ status: "reset", source: req.params.source });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to reset breaker" });
+  }
+});
+
+// ── Apply discovery stats & recent results ────────────────────
+app.get("/api/apply-discovery/stats", async (req, res) => {
+  try {
+    const source = req.query.source as string | undefined;
+    const stats = await getApplyDiscoveryStats(source);
+    res.json(stats);
+  } catch (err) {
+    log.error({ err }, "Failed to fetch apply discovery stats");
+    res.status(500).json({ error: "Failed to fetch apply discovery stats" });
+  }
+});
+
+app.get("/api/apply-discovery/recent", async (req, res) => {
+  try {
+    const source = req.query.source as string | undefined;
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const results = await getRecentApplyDiscoveries(source, limit);
+    res.json({ results });
+  } catch (err) {
+    log.error({ err }, "Failed to fetch apply discoveries");
+    res.status(500).json({ error: "Failed to fetch apply discoveries" });
+  }
+});
+
+// ── Dispatch resolve_apply for a specific job ─────────────────
+app.post("/api/apply-discovery/resolve", async (req, res) => {
+  const { jobKey, source, applyUrl, sourceDescUrl } = req.body ?? {};
+  if (!jobKey || !source || !applyUrl) {
+    return res.status(400).json({ error: "jobKey, source, and applyUrl are required" });
+  }
+  try {
+    const payload = {
+      type: "resolve_apply" as const,
+      jobKey,
+      source,
+      applyUrl,
+      sourceDescUrl,
+    };
+    const queue = routeCommand(payload);
+    const jobId = await dispatch(payload);
+    res.json({ status: "dispatched", queue, jobId, jobKey });
+  } catch (err) {
+    log.error({ err }, "Apply discovery dispatch failed");
+    res.status(500).json({ error: "Apply discovery dispatch failed" });
+  }
+});
+
+// ── Release lease (manual cleanup) ────────────────────────────
+app.post("/api/lease/:source/release", async (req, res) => {
+  const { source } = req.params;
+  const { holder } = req.body ?? {};
+  try {
+    const released = await releaseLease(source, holder ?? "manual-trigger");
+    res.json({ released, source });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to release lease" });
   }
 });
 

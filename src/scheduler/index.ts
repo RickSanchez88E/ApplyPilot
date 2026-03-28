@@ -1,6 +1,7 @@
 /**
- * Scheduler — creates recurring commands via interval timers.
+ * Scheduler — per-source interval-based dispatch.
  *
+ * Each source has its own schedule interval, lease check, and cooldown check.
  * Does NOT run scraping directly; only dispatches commands to queues.
  * Entrypoint: `tsx src/scheduler/index.ts`
  */
@@ -9,41 +10,78 @@ import { dispatch } from "../queue/setup.js";
 import { query } from "../db/client.js";
 import { createChildLogger } from "../lib/logger.js";
 import { getConfig } from "../shared/config.js";
+import { isLeaseHeld } from "./source-lease.js";
+import { isSourceInCooldown, getBreakerState } from "../browser/circuit-breaker.js";
 
 const log = createChildLogger({ module: "scheduler" });
 
-const DISCOVER_INTERVAL_MS = 30 * 60 * 1000;
 const EXPIRY_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const EXPIRY_BATCH_LIMIT = 100;
 
-let discoverTimer: ReturnType<typeof setInterval> | null = null;
+export interface SourceScheduleConfig {
+  source: string;
+  intervalMs: number;
+}
+
+const DEFAULT_SCHEDULES: SourceScheduleConfig[] = [
+  { source: "linkedin",  intervalMs: 20 * 60 * 1000 },
+  { source: "reed",      intervalMs: 30 * 60 * 1000 },
+  { source: "remoteok",  intervalMs: 60 * 60 * 1000 },
+  { source: "devitjobs", intervalMs: 2 * 60 * 60 * 1000 },
+  { source: "hn_hiring", intervalMs: 6 * 60 * 60 * 1000 },
+  { source: "jooble",    intervalMs: 4 * 60 * 60 * 1000 },
+];
+
+const sourceTimers = new Map<string, ReturnType<typeof setInterval>>();
 let expiryTimer: ReturnType<typeof setInterval> | null = null;
 
-async function dispatchDiscoverAll(): Promise<void> {
-  const config = getConfig();
-  const sources = config.enabledSources;
-  log.info({ sources }, "Dispatching discover_jobs for all enabled sources");
+async function canDispatch(source: string): Promise<{ ok: boolean; reason?: string }> {
+  const lease = await isLeaseHeld(source);
+  if (lease) {
+    return { ok: false, reason: `lease held by ${lease.holder} until ${lease.expiresAt}` };
+  }
 
-  for (const source of sources) {
+  const inCooldown = await isSourceInCooldown(source);
+  if (inCooldown) {
+    const state = await getBreakerState(source);
+    return { ok: false, reason: `cooldown until ${state.cooldownUntil}` };
+  }
+
+  return { ok: true };
+}
+
+async function dispatchForSource(source: string): Promise<void> {
+  const check = await canDispatch(source);
+  if (!check.ok) {
+    log.debug({ source, reason: check.reason }, "Skipping scheduled dispatch");
+    return;
+  }
+
+  const config = getConfig();
+  try {
+    const jobId = await dispatch({
+      type: "discover_jobs",
+      source,
+      keywords: config.searchKeywords,
+      location: config.searchLocation,
+    });
+
+    log.info({ source, jobId }, "Scheduled dispatch: discover_jobs");
+
     try {
-      const jobId = await dispatch({
-        type: "discover_jobs",
-        source,
-        keywords: config.searchKeywords,
-        location: config.searchLocation,
-      });
-      log.info({ source, jobId }, "Dispatched discover_jobs");
-    } catch (err) {
-      log.error({ source, err }, "Failed to dispatch discover_jobs");
-    }
+      await query(
+        `UPDATE public.source_schedule_state
+         SET last_dispatched_at = NOW(), next_dispatch_at = NOW() + (interval_ms || ' milliseconds')::interval, updated_at = NOW()
+         WHERE source = $1`,
+        [source],
+      );
+    } catch { /* table may not exist */ }
+  } catch (err) {
+    log.error({ source, err }, "Failed to dispatch discover_jobs");
   }
 }
 
 async function dispatchExpiryChecks(): Promise<void> {
-  // Candidates:
-  // 1. suspected_expired jobs — need re-verification
-  // 2. active jobs not seen in 48+ hours — may have gone stale
-  // 3. blocked jobs with cooldown > 6 hours — retry
   const candidates = await query<{ job_key: string; source: string }>(
     `SELECT job_key, source FROM public.jobs_current
      WHERE
@@ -80,32 +118,55 @@ async function dispatchExpiryChecks(): Promise<void> {
 }
 
 export function startScheduler(): void {
-  log.info(
-    { discoverIntervalMs: DISCOVER_INTERVAL_MS, expiryIntervalMs: EXPIRY_CHECK_INTERVAL_MS },
-    "Scheduler started",
-  );
+  const enabledSources = getConfig().enabledSources;
 
-  discoverTimer = setInterval(() => {
-    dispatchDiscoverAll().catch((err) => log.error({ err }, "Discover dispatch error"));
-  }, DISCOVER_INTERVAL_MS);
+  log.info({ enabledSources, schedules: DEFAULT_SCHEDULES.map(s => `${s.source}:${s.intervalMs}ms`) }, "Scheduler starting with per-source intervals");
+
+  for (const sched of DEFAULT_SCHEDULES) {
+    if (!enabledSources.includes(sched.source)) {
+      log.info({ source: sched.source }, "Source not enabled — skipping schedule");
+      continue;
+    }
+
+    const timer = setInterval(() => {
+      dispatchForSource(sched.source).catch(err =>
+        log.error({ source: sched.source, err }, "Scheduled dispatch error"),
+      );
+    }, sched.intervalMs);
+    sourceTimers.set(sched.source, timer);
+
+    log.info({ source: sched.source, intervalMs: sched.intervalMs, intervalMin: Math.round(sched.intervalMs / 60000) }, "Source schedule registered");
+  }
 
   expiryTimer = setInterval(() => {
-    dispatchExpiryChecks().catch((err) => log.error({ err }, "Expiry dispatch error"));
+    dispatchExpiryChecks().catch(err => log.error({ err }, "Expiry dispatch error"));
   }, EXPIRY_CHECK_INTERVAL_MS);
 
-  dispatchDiscoverAll().catch((err) => log.error({ err }, "Initial discover dispatch error"));
+  // Initial dispatch for all sources (staggered to avoid burst)
+  let delay = 0;
+  for (const sched of DEFAULT_SCHEDULES) {
+    if (!enabledSources.includes(sched.source)) continue;
+    setTimeout(() => {
+      dispatchForSource(sched.source).catch(err =>
+        log.error({ source: sched.source, err }, "Initial dispatch error"),
+      );
+    }, delay);
+    delay += 2000;
+  }
 }
 
 export function stopScheduler(): void {
-  if (discoverTimer) clearInterval(discoverTimer);
+  for (const [source, timer] of sourceTimers) {
+    clearInterval(timer);
+    log.debug({ source }, "Source timer cleared");
+  }
+  sourceTimers.clear();
   if (expiryTimer) clearInterval(expiryTimer);
-  discoverTimer = null;
   expiryTimer = null;
   log.info("Scheduler stopped");
 }
 
-// Exported for testing
-export { dispatchExpiryChecks, dispatchDiscoverAll };
+export { dispatchExpiryChecks, dispatchForSource, canDispatch, DEFAULT_SCHEDULES };
 
 if (process.argv[1]?.includes("scheduler")) {
   startScheduler();

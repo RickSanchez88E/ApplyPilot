@@ -28,9 +28,9 @@ describe("discover_jobs routes correctly", () => {
     expect(routeCommand(cmd)).toBe(QUEUE_NAMES.browser);
   });
 
-  it("jooble discover → browser", () => {
+  it("jooble discover → local-browser", () => {
     const cmd: CommandPayload = { type: "discover_jobs", source: "jooble" };
-    expect(routeCommand(cmd)).toBe(QUEUE_NAMES.browser);
+    expect(routeCommand(cmd)).toBe(QUEUE_NAMES.localBrowser);
   });
 
   it("reed discover → general", () => {

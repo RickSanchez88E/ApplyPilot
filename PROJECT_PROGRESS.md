@@ -418,7 +418,79 @@ src/
 - [x] 移除旧 SourceFilters sidebar, ScrapeControls 多选模式
 - [x] 126 tests pass, tsc 0 errors
 
-### 后续待办（v3.0 剩余）
+### v3.2 本地持久化浏览器 + 平台级调度 + Apply Discovery (2026-03-28)
+
+#### A. 本地持久化浏览器执行层
+- [x] `src/browser/local-browser-manager.ts`: Chrome 持久化 profile 管理（启动/page 生命周期/idle timeout/熔断销毁）
+- [x] `src/browser/circuit-breaker.ts`: Redis-backed 熔断器（连续失败 ≥3 次 → cooldown 30min，可配置）
+- [x] 生命周期：page 每任务创建/关闭，browser idle 5min 自动关闭，熔断时销毁进程但保留 profile
+- [x] 支持 Jooble、LinkedIn、apply discovery 的 Google OAuth 链路
+
+#### B. 平台级调度层
+- [x] Scheduler 完全重写为 per-source 独立间隔：
+  - linkedin: 20min / reed: 30min / remoteok: 60min / devitjobs: 2h / hn_hiring: 6h / jooble: 4h
+- [x] `src/scheduler/source-lease.ts`: Redis-backed source 运行锁
+- [x] Scheduler dispatch 前检查: lease / cooldown / breaker 状态
+- [x] 手动触发自动抢占 lease，scheduler 对该 source 暂停
+- [x] `source_schedule_state` 表持久化调度状态
+
+#### C. Apply Discovery / Final Form Resolution
+- [x] `src/domain/apply-discovery/types.ts`: 11 种 apply 状态建模
+- [x] `src/domain/apply-discovery/apply-resolver.ts`: 跳转链跟踪 + 表单检测 + ATS 识别 + OAuth/登录页检测
+- [x] `src/repositories/apply-discovery-repository.ts`: upsert + stats + recent 查询
+- [x] DB migration 006: `apply_discovery_results` 表 + `source_schedule_state` 表
+
+#### D. 数据模型
+- [x] `apply_discovery_results`: 独立表 (job_key UNIQUE)，11 种状态枚举
+- [x] 字段: redirect_chain jsonb, form_schema_snapshot jsonb, form_provider, oauth_provider 等
+- [x] `source_schedule_state`: 每 source 调度间隔 / 上次/下次 dispatch / lease / cooldown
+
+#### E. 前端 i18n + 平台视图增强
+- [x] `frontend/src/lib/i18n.ts`: 60+ 翻译词条，支持 zh/en 切换
+- [x] Navbar 右上角语言切换按钮
+- [x] OverviewPage: 新增 apply discovery 统计卡片（form reached / desc only / login required / blocked）
+- [x] PlatformPage: 新增 apply discovery 区域 + cooldown/busy 错误处理 + force trigger 按钮
+- [x] PlatformProgress: i18n 状态文本
+
+#### F. Jooble 成本控制
+- [x] Jooble discover_jobs 路由到 `worker-local-browser` 队列（concurrency=1）
+- [x] 本地持久化浏览器慢速模式（非代理高并发）
+- [x] 熔断器：CF block / tunnel failure / timeout → 3 次触发 cooldown
+- [x] 环境变量可配置：hard cap / 页面间延迟 / 熔断阈值
+
+#### G. Docker / 启动
+- [x] 5 容器继续自启（postgres, redis, api, scheduler, worker-general）
+- [x] worker-browser 容器（LinkedIn CDP）
+- [x] local-browser-worker 作为宿主机进程（`npx tsx src/queue/local-browser-worker.ts`）
+- [x] docker-compose.yml 注释说明 local-browser-worker 不在容器内
+
+#### H. 新增 API 端点
+- [x] `GET /api/schedule/state` — 每 source 调度状态
+- [x] `GET /api/breaker/:source` — 熔断器状态
+- [x] `POST /api/breaker/:source/reset` — 强制重置熔断
+- [x] `GET /api/apply-discovery/stats?source=X` — apply 解析统计
+- [x] `GET /api/apply-discovery/recent?source=X` — 最近 apply 解析结果
+- [x] `POST /api/apply-discovery/resolve` — 手动触发 apply 解析
+- [x] `POST /api/lease/:source/release` — 手动释放 source lease
+- [x] `POST /api/trigger/source/:source` — 增加 lease 抢占 + cooldown 检查 + force 参数
+
+#### I. Queue 命令扩展
+- [x] 新增 `resolve_apply` 命令类型
+- [x] 新增 `worker-local-browser` 队列
+- [x] Jooble discover 路由从 `worker-browser` 改为 `worker-local-browser`
+
+#### J. 验证结果
+- [x] tsc 0 errors（前后端）
+- [x] 127 tests passed (vitest)
+- [x] 6 容器全部 Up + healthy
+- [x] Scheduler 自动 dispatch 6 sources，per-source 间隔正确
+- [x] 手动 trigger 成功抢占 lease 并 dispatch
+- [x] 所有新 API 端点返回正确数据
+
+### 后续待办
+- [ ] 本地 browser worker 实际启动验证（需要宿主机 Chrome profile）
+- [ ] apply discovery 端到端验证（resolve_apply → 跳转链 → 表单检测 → 入库）
+- [ ] Jooble 本地浏览器模式端到端验证
 - [ ] verify_job / enrich_job processor 真实实现
 - [ ] progress.ts 重构为 Redis pub/sub（跨容器 SSE 实时进度）
 - [ ] 存量数据回填 jobs_current

@@ -5,6 +5,7 @@
 export const QUEUE_NAMES = {
   general: "worker-general",
   browser: "worker-browser",
+  localBrowser: "worker-local-browser",
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -40,16 +41,32 @@ export interface RefreshCursorPayload {
   source: string;
 }
 
+export interface ResolveApplyPayload {
+  type: "resolve_apply";
+  jobKey: string;
+  source: string;
+  applyUrl: string;
+  sourceDescUrl?: string;
+}
+
 export type CommandPayload =
   | DiscoverJobsPayload
   | VerifyJobPayload
   | EnrichJobPayload
   | RecheckExpiryPayload
-  | RefreshCursorPayload;
+  | RefreshCursorPayload
+  | ResolveApplyPayload;
 
 const BROWSER_SOURCES = new Set(["linkedin", "jooble"]);
+const LOCAL_BROWSER_SOURCES = new Set(["jooble"]);
 
 export function routeCommand(payload: CommandPayload): QueueName {
+  if (payload.type === "resolve_apply") {
+    return QUEUE_NAMES.localBrowser;
+  }
+  if (payload.type === "discover_jobs" && LOCAL_BROWSER_SOURCES.has(payload.source)) {
+    return QUEUE_NAMES.localBrowser;
+  }
   if (payload.type === "discover_jobs" && BROWSER_SOURCES.has(payload.source)) {
     return QUEUE_NAMES.browser;
   }

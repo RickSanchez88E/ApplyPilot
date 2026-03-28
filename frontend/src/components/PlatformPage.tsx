@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Play, Filter } from 'lucide-react';
+import { Play, Filter, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { JobsTable } from './JobsTable';
 import { PlatformProgress } from './PlatformProgress';
+import { t, type Locale } from '../lib/i18n';
 
 interface SourceCapability {
   name: string;
@@ -12,6 +13,11 @@ interface SourceCapability {
   supportedTimeOptions: string[];
 }
 
+interface ApplyStats {
+  total: number;
+  byStatus: Record<string, number>;
+}
+
 const ALL_SCRAPE_TIME_OPTIONS = [
   { value: 'r86400',   label: '24h' },
   { value: 'r604800',  label: '1 week' },
@@ -19,7 +25,7 @@ const ALL_SCRAPE_TIME_OPTIONS = [
 ];
 
 const INGEST_FILTER_OPTIONS = [
-  { value: '', label: 'All' },
+  { value: '', labelKey: 'platform.all' },
   { value: '1h', label: '1h' },
   { value: '6h', label: '6h' },
   { value: '24h', label: '24h' },
@@ -30,9 +36,10 @@ function AnimatedNumber({ value }: { value: number }) {
   return <span className="font-mono">{value.toLocaleString()}</span>;
 }
 
-export function PlatformPage({ source }: { source: string }) {
+export function PlatformPage({ source, locale }: { source: string; locale: Locale }) {
   const [capability, setCapability] = useState<SourceCapability | null>(null);
   const [stats, setStats] = useState<Record<string, number> | null>(null);
+  const [applyStats, setApplyStats] = useState<ApplyStats | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [dispatchMsg, setDispatchMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -56,6 +63,10 @@ export function PlatformPage({ source }: { source: string }) {
         .then(r => r.json())
         .then(setStats)
         .catch(() => {});
+      fetch(`/api/apply-discovery/stats?source=${source}`)
+        .then(r => r.json())
+        .then(setApplyStats)
+        .catch(() => {});
     };
     fetchStats();
     const iv = setInterval(fetchStats, 30000);
@@ -65,12 +76,12 @@ export function PlatformPage({ source }: { source: string }) {
   const supportsTime = capability?.supportsNativeTimeFilter ?? false;
   const availableOptions = capability?.supportedTimeOptions ?? [];
 
-  const handleTrigger = async () => {
+  const handleTrigger = async (force = false) => {
     setDispatching(true);
     setDispatchMsg(null);
     setErrorMsg(null);
     try {
-      const body: Record<string, unknown> = {};
+      const body: Record<string, unknown> = { force };
       if (supportsTime && availableOptions.includes(scrapeTimeFilter)) {
         body.timeFilter = scrapeTimeFilter;
       }
@@ -79,13 +90,25 @@ export function PlatformPage({ source }: { source: string }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+
+      const result = await resp.json() as Record<string, unknown>;
+
       if (!resp.ok) {
-        const d = await resp.json().catch(() => ({}));
-        throw new Error((d as Record<string, string>).error || `HTTP ${resp.status}`);
+        if (result.error === 'source_in_cooldown') {
+          setDispatching(false);
+          setErrorMsg(`${t('platform.cooldown', locale)} (${result.cooldownUntil})`);
+          return;
+        }
+        if (result.error === 'source_busy') {
+          setDispatching(false);
+          setErrorMsg(`${t('platform.busy', locale)} (${result.currentHolder})`);
+          return;
+        }
+        throw new Error((result.error as string) || `HTTP ${resp.status}`);
       }
-      const result = await resp.json() as { queue: string; jobId: string };
+
       setDispatching(false);
-      setDispatchMsg(`Queued → ${result.queue} (${result.jobId})`);
+      setDispatchMsg(`${t('common.queued', locale)} → ${result.queue} (${result.jobId})`);
       setTimeout(() => setDispatchMsg(null), 6000);
     } catch (err: unknown) {
       setDispatching(false);
@@ -94,10 +117,10 @@ export function PlatformPage({ source }: { source: string }) {
   };
 
   const statItems = stats ? [
-    { label: 'Total', value: stats.total ?? 0 },
-    { label: 'Last 24h', value: stats.last_24h ?? 0 },
-    { label: 'Last 1h', value: stats.last_1h ?? 0 },
-    { label: 'Sponsor', value: stats.sponsor_jobs ?? 0 },
+    { label: t('platform.total', locale), value: stats.total ?? 0 },
+    { label: t('overview.last24h', locale), value: stats.last_24h ?? 0 },
+    { label: t('overview.last1h', locale), value: stats.last_1h ?? 0 },
+    { label: t('platform.sponsor', locale), value: stats.sponsor_jobs ?? 0 },
   ] : null;
 
   return (
@@ -106,12 +129,12 @@ export function PlatformPage({ source }: { source: string }) {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {/* Trigger card */}
         <div className="panel p-4">
-          <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">Dispatch</h3>
+          <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('platform.dispatch', locale)}</h3>
 
           {supportsTime && availableOptions.length > 0 ? (
             <div className="mb-3">
               <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-accent)] font-mono font-semibold mb-1.5">
-                <Filter className="w-3 h-3" /> Time Window
+                <Filter className="w-3 h-3" /> {t('platform.timeWindow', locale)}
               </div>
               <div className="flex gap-1 flex-wrap">
                 {ALL_SCRAPE_TIME_OPTIONS.filter(o => availableOptions.includes(o.value)).map(opt => (
@@ -130,11 +153,11 @@ export function PlatformPage({ source }: { source: string }) {
               </div>
             </div>
           ) : (
-            <p className="text-[11px] font-mono text-[var(--color-text-dim)] mb-3">Full fetch — no native time filter</p>
+            <p className="text-[11px] font-mono text-[var(--color-text-dim)] mb-3">{t('platform.fullFetch', locale)}</p>
           )}
 
           <button
-            onClick={handleTrigger}
+            onClick={() => handleTrigger(false)}
             disabled={dispatching}
             className="w-full flex justify-center items-center gap-2 py-2 px-3 rounded-lg bg-[var(--color-accent)] text-white font-semibold text-sm hover:opacity-90 transition-all disabled:opacity-40"
           >
@@ -143,17 +166,27 @@ export function PlatformPage({ source }: { source: string }) {
             ) : (
               <Play className="w-3.5 h-3.5 fill-current" />
             )}
-            {dispatching ? 'Dispatching…' : 'Run Now'}
+            {dispatching ? t('platform.dispatching', locale) : t('platform.runNow', locale)}
           </button>
+
+          {errorMsg && errorMsg.includes('cooldown') && (
+            <button
+              onClick={() => handleTrigger(true)}
+              className="w-full mt-2 flex justify-center items-center gap-1.5 py-1.5 px-3 rounded-lg border border-amber-400 text-amber-600 text-xs font-medium hover:bg-amber-50 transition-all"
+            >
+              <ShieldAlert className="w-3 h-3" />
+              {t('platform.forceTrigger', locale)}
+            </button>
+          )}
 
           {dispatchMsg && (
             <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[11px] font-mono text-[var(--color-success)] mt-2 text-center">
-              ✓ {dispatchMsg}
+              {dispatchMsg}
             </motion.p>
           )}
           {errorMsg && (
             <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[11px] font-mono text-[var(--color-danger)] mt-2 text-center">
-              ✗ {errorMsg}
+              {errorMsg}
             </motion.p>
           )}
         </div>
@@ -179,13 +212,42 @@ export function PlatformPage({ source }: { source: string }) {
         )}
       </div>
 
+      {/* Apply Discovery stats (if available) */}
+      {applyStats && applyStats.total > 0 && (
+        <div className="panel p-4">
+          <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('apply.title', locale)}</h3>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="text-center">
+              <div className="text-lg font-semibold text-[var(--color-success)]">{applyStats.byStatus.final_form_reached ?? 0}</div>
+              <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.finalForm', locale)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-semibold">{applyStats.byStatus.platform_desc_only ?? 0}</div>
+              <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.platformDesc', locale)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-semibold text-amber-600">{(applyStats.byStatus.requires_login ?? 0) + (applyStats.byStatus.oauth_google ?? 0)}</div>
+              <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.needsLogin', locale)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-semibold text-[var(--color-danger)]">{applyStats.byStatus.blocked ?? 0}</div>
+              <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.blocked', locale)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-semibold text-[var(--color-text-dim)]">{applyStats.byStatus.unresolved ?? 0}</div>
+              <div className="text-[10px] font-mono text-[var(--color-text-dim)]">{t('apply.unresolved', locale)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Progress / recent runs */}
-      <PlatformProgress source={source} />
+      <PlatformProgress source={source} locale={locale} />
 
       {/* Ingest filter + Jobs table */}
       <div>
         <div className="flex items-center gap-1.5 mb-3">
-          <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-dim)] font-mono">Ingested</span>
+          <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-dim)] font-mono">{t('platform.ingested', locale)}</span>
           {INGEST_FILTER_OPTIONS.map(opt => (
             <button
               key={opt.value}
@@ -194,7 +256,7 @@ export function PlatformPage({ source }: { source: string }) {
                 ingestFilter === opt.value ? 'pill-active' : 'pill-inactive'
               }`}
             >
-              {opt.label}
+              {opt.labelKey ? t(opt.labelKey, locale) : opt.label}
             </button>
           ))}
         </div>

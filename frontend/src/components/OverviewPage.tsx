@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { SOURCES } from '../lib/utils';
+import { t, type Locale } from '../lib/i18n';
 import { OverviewProgress } from './PlatformProgress';
 import { KeywordConfig } from './KeywordConfig';
 
@@ -20,33 +21,43 @@ interface OverviewStats {
   duplicateInfo: { unique_jobs: number; total_listings: number };
 }
 
+interface ApplyStats {
+  total: number;
+  byStatus: Record<string, number>;
+}
+
 function AnimatedNumber({ value }: { value: number }) {
   return <span className="font-mono">{value.toLocaleString()}</span>;
 }
 
-export function OverviewPage() {
+export function OverviewPage({ locale }: { locale: Locale }) {
   const [stats, setStats] = useState<OverviewStats | null>(null);
+  const [applyStats, setApplyStats] = useState<ApplyStats | null>(null);
 
   useEffect(() => {
-    const fetch_ = () => {
+    const fetchAll = () => {
       fetch('/api/jobs/stats')
         .then(r => r.json())
         .then(setStats)
         .catch(() => {});
+      fetch('/api/apply-discovery/stats')
+        .then(r => r.json())
+        .then(setApplyStats)
+        .catch(() => {});
     };
-    fetch_();
-    const iv = setInterval(fetch_, 30000);
+    fetchAll();
+    const iv = setInterval(fetchAll, 30000);
     return () => clearInterval(iv);
   }, []);
 
   if (!stats) return <div className="h-40 panel animate-pulse" />;
 
   const kpis = [
-    { label: 'Total Jobs', value: stats.total },
-    { label: 'Last 24h', value: stats.last_24h },
-    { label: 'Last 1h', value: stats.last_1h },
-    { label: 'Sponsorship', value: stats.sponsor_jobs },
-    { label: 'Companies', value: stats.companies },
+    { label: t('overview.totalJobs', locale), value: stats.total },
+    { label: t('overview.last24h', locale), value: stats.last_24h },
+    { label: t('overview.last1h', locale), value: stats.last_1h },
+    { label: t('overview.sponsorship', locale), value: stats.sponsor_jobs },
+    { label: t('overview.companies', locale), value: stats.companies },
   ];
 
   const maxCount = Math.max(...(stats.bySource || []).map(s => s.count), 1);
@@ -72,7 +83,7 @@ export function OverviewPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Source distribution */}
         <div className="lg:col-span-2 panel p-5">
-          <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-4">Source Distribution</h3>
+          <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-4">{t('overview.sourceDistribution', locale)}</h3>
           <div className="space-y-2.5">
             {(stats.bySource || []).map(src => {
               const pct = Math.max((src.count / maxCount) * 100, 2);
@@ -100,20 +111,45 @@ export function OverviewPage() {
           </div>
         </div>
 
-        {/* Sidebar: config + duplicates */}
+        {/* Sidebar: config + duplicates + apply stats */}
         <div className="space-y-5">
           <KeywordConfig />
           {stats.duplicateInfo && (
             <div className="panel p-5">
-              <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">Cross-Platform Duplicates</h3>
+              <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('overview.crossPlatformDuplicates', locale)}</h3>
               <div className="text-sm font-mono space-y-1">
                 <div className="flex justify-between">
-                  <span className="text-[var(--color-text-dim)]">Unique hashes</span>
+                  <span className="text-[var(--color-text-dim)]">{t('overview.uniqueHashes', locale)}</span>
                   <span className="text-[var(--color-text)]">{stats.duplicateInfo.unique_jobs?.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[var(--color-text-dim)]">Total listings</span>
+                  <span className="text-[var(--color-text-dim)]">{t('overview.totalListings', locale)}</span>
                   <span className="text-[var(--color-text)]">{stats.duplicateInfo.total_listings?.toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Apply Discovery Overview */}
+          {applyStats && applyStats.total > 0 && (
+            <div className="panel p-5">
+              <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono mb-3">{t('overview.applyResolution', locale)}</h3>
+              <div className="text-sm font-mono space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-[var(--color-text-dim)]">{t('overview.formReached', locale)}</span>
+                  <span className="text-[var(--color-success)]">{applyStats.byStatus.final_form_reached ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[var(--color-text-dim)]">{t('overview.descOnly', locale)}</span>
+                  <span className="text-[var(--color-text)]">{applyStats.byStatus.platform_desc_only ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[var(--color-text-dim)]">{t('overview.loginRequired', locale)}</span>
+                  <span className="text-amber-600">{(applyStats.byStatus.requires_login ?? 0) + (applyStats.byStatus.oauth_google ?? 0) + (applyStats.byStatus.oauth_linkedin ?? 0)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[var(--color-text-dim)]">{t('overview.blocked', locale)}</span>
+                  <span className="text-[var(--color-danger)]">{applyStats.byStatus.blocked ?? 0}</span>
                 </div>
               </div>
             </div>
@@ -121,8 +157,7 @@ export function OverviewPage() {
         </div>
       </div>
 
-      {/* Latest runs overview */}
-      <OverviewProgress />
+      <OverviewProgress locale={locale} />
     </div>
   );
 }

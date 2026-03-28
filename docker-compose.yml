@@ -109,6 +109,11 @@ services:
     mem_limit: 2g
     cpus: 2.0
 
+  # NOTE: local-browser-worker runs on the HOST machine (not in Docker).
+  # It uses the host's Chrome profile for Jooble and apply discovery.
+  # Start with: npx tsx src/queue/local-browser-worker.ts
+  # Or: node dist/queue/local-browser-worker.js
+
 volumes:
   pgdata:
   redisdata:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { t, type Locale } from '../lib/i18n';
 
 interface CrawlRun {
   id: string;
@@ -33,7 +34,7 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-export function PlatformProgress({ source }: { source: string }) {
+export function PlatformProgress({ source, locale }: { source: string; locale?: Locale }) {
   const [runs, setRuns] = useState<CrawlRun[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -52,14 +53,14 @@ export function PlatformProgress({ source }: { source: string }) {
   if (loading) return <div className="panel p-4 h-24 animate-pulse" />;
   if (runs.length === 0) return (
     <div className="panel p-4">
-      <p className="text-xs font-mono text-[var(--color-text-dim)]">No crawl runs yet for this source.</p>
+      <p className="text-xs font-mono text-[var(--color-text-dim)]">{t('progress.noRuns', locale)}</p>
     </div>
   );
 
   return (
     <div className="panel overflow-hidden">
       <div className="px-4 py-3 border-b border-[var(--color-border)]">
-        <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono">Recent Runs</h3>
+        <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono">{t('progress.recentRuns', locale)}</h3>
       </div>
       <div className="divide-y divide-[var(--color-border)]">
         <AnimatePresence>
@@ -73,8 +74,8 @@ export function PlatformProgress({ source }: { source: string }) {
                 className="px-4 py-2.5 flex items-center gap-3 text-xs font-mono"
               >
                 <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot} ${run.status === 'running' ? 'animate-pulse' : ''}`} />
-                <span className={`w-16 shrink-0 font-medium ${style.text}`}>{run.status}</span>
-                <span className="text-[var(--color-text-dim)] w-16 shrink-0">{run.task_type.replace('_', ' ')}</span>
+                <span className={`w-16 shrink-0 font-medium ${style.text}`}>{t(`progress.${run.status}`, locale)}</span>
+                <span className="text-[var(--color-text-dim)] w-20 shrink-0">{run.task_type.replace(/_/g, ' ')}</span>
                 <span className="text-[var(--color-text-secondary)] w-12 text-right shrink-0">{formatDuration(run.duration_ms)}</span>
                 {run.jobs_found != null && (
                   <span className="text-[var(--color-text-dim)]">
@@ -96,7 +97,7 @@ export function PlatformProgress({ source }: { source: string }) {
   );
 }
 
-export function OverviewProgress() {
+export function OverviewProgress({ locale }: { locale?: Locale }) {
   const [runs, setRuns] = useState<CrawlRun[]>([]);
 
   useEffect(() => {
@@ -122,7 +123,7 @@ export function OverviewProgress() {
   return (
     <div className="panel overflow-hidden">
       <div className="px-4 py-3 border-b border-[var(--color-border)]">
-        <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono">Latest Run Per Source</h3>
+        <h3 className="text-[10px] uppercase tracking-widest font-semibold text-[var(--color-text-secondary)] font-mono">{t('progress.latestRuns', locale)}</h3>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-px bg-[var(--color-border)]">
         {sources.map(([src, run]) => {
@@ -134,7 +135,7 @@ export function OverviewProgress() {
                 <span className="text-xs font-semibold capitalize text-[var(--color-text)]">{src.replace('_hiring', ' HN')}</span>
               </div>
               <div className="text-[11px] font-mono text-[var(--color-text-dim)]">
-                <span className={style.text}>{run.status}</span>
+                <span className={style.text}>{t(`progress.${run.status}`, locale)}</span>
                 {run.duration_ms != null && <span> · {formatDuration(run.duration_ms)}</span>}
                 {run.jobs_inserted != null && run.jobs_inserted > 0 && <span> · +{run.jobs_inserted} new</span>}
               </div>

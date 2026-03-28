@@ -4,7 +4,7 @@
 
 import { query } from "../db/client.js";
 
-export type CrawlTaskType = "discover_jobs" | "verify_job" | "enrich_job" | "recheck_expiry" | "refresh_source_cursor";
+export type CrawlTaskType = "discover_jobs" | "verify_job" | "enrich_job" | "recheck_expiry" | "refresh_source_cursor" | "resolve_apply";
 export type CrawlRunStatus = "running" | "completed" | "failed" | "cancelled";
 
 export interface CreateRunInput {
