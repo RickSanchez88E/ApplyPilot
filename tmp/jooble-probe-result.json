@@ -1,0 +1,14 @@
+{
+  "experiment": "jooble_desc_concurrency_2",
+  "descConcurrency": 2,
+  "jobsFound": 2,
+  "error": null,
+  "cfBlocked": false,
+  "elapsedMs": 77160,
+  "totalPagesAfterRun": 1,
+  "defaultPagesAfterRun": 1,
+  "jooble_desc_concurrency_check": "PASS (configured=2)",
+  "jooble_default_page_cleanup_check": "PASS",
+  "jooble_challenge_abort_check": "N/A (no challenge occurred — abort mechanism not triggered)",
+  "jooble_real_run_check": "PASS (concurrency=2, no CF challenge)"
+}

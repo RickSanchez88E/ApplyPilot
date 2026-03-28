@@ -1,0 +1,17 @@
+{
+  "passed": 66,
+  "failed": 0,
+  "verdict": "PASS",
+  "phantom_slot_check": "PASS",
+  "waiter_cleanup_check": "PASS",
+  "force_release_rejects_pending_waiters": "PASS",
+  "timeout_waiter_cannot_be_woken_later": "PASS",
+  "guardian_over_threshold_trips_cleanup": "PASS",
+  "guardian_ignores_non_automation_browser": "PASS",
+  "automation_pid_registration_check": "PASS",
+  "guardian_tracking_mode_check": "PASS",
+  "guardian_cleanup_pid_clear_check": "PASS",
+  "guardian_state_rss_cached_check": "PASS",
+  "automation_pid_value": "74000",
+  "guardian_mode": "tracking_active"
+}

@@ -23,10 +23,12 @@ import {
 
 const log = createChildLogger({ module: "jooble-local" });
 
-const HARD_CAP = parseInt(process.env.JOOBLE_DESC_HARD_CAP ?? "20", 10);
-const DELAY_MIN_MS = parseInt(process.env.JOOBLE_PAGE_DELAY_MIN_MS ?? "5000", 10);
-const DELAY_MAX_MS = parseInt(process.env.JOOBLE_PAGE_DELAY_MAX_MS ?? "15000", 10);
-const MAX_SEARCH_PAGES = 3;
+const HARD_CAP = parseInt(process.env.JOOBLE_DESC_HARD_CAP ?? "5", 10);
+const DELAY_MIN_MS = parseInt(process.env.JOOBLE_PAGE_DELAY_MIN_MS ?? "15000", 10);
+const DELAY_MAX_MS = parseInt(process.env.JOOBLE_PAGE_DELAY_MAX_MS ?? "45000", 10);
+const MAX_SEARCH_PAGES = parseInt(process.env.JOOBLE_MAX_SEARCH_PAGES ?? "1", 10);
+const JOOBLE_CF_THRESHOLD = 1; // single challenge = immediate stop
+const JOOBLE_BREAKER_COOLDOWN_MS = parseInt(process.env.JOOBLE_BREAKER_COOLDOWN_MS ?? "43200000", 10); // 12 hours
 
 function randomDelay(): Promise<void> {
   const ms = Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS + 1)) + DELAY_MIN_MS;
@@ -196,6 +198,168 @@ async function scrapeDescPage(page: Page, descUrl: string): Promise<ScrapeJooble
   };
 }
 
+/**
+ * Desc page concurrency for Jooble.
+ * Default = 2 for the parallel experiment. Set JOOBLE_DESC_CONCURRENCY=1 to revert to serial.
+ */
+const JOOBLE_DESC_CONCURRENCY = Math.max(1, parseInt(process.env.JOOBLE_DESC_CONCURRENCY ?? "2", 10));
+
+interface DescResult {
+  card: SearchCard;
+  job: NewJob | null;
+  cfBlocked: boolean;
+  error: string | null;
+}
+
+/**
+ * Scrape a single desc page using its OWN page instance (created + closed here).
+ * Returns structured result including CF block status.
+ */
+async function scrapeOneDesc(
+  context: import("playwright").BrowserContext,
+  card: SearchCard,
+  location: string,
+): Promise<DescResult> {
+  let page: Page | null = null;
+  try {
+    page = await context.newPage();
+    const outcome = await scrapeDescPage(page, card.descUrl);
+
+    if (outcome.ok) {
+      const detail = outcome.detail;
+      if (detail.title.length >= 5 && detail.description.length >= 50) {
+        const applyUrl = isExternalEmployerApplyUrl(detail.applyUrl) ? detail.applyUrl : undefined;
+        return {
+          card,
+          job: {
+            companyName: detail.company || card.company || "Unknown",
+            jobTitle: detail.title,
+            location: detail.location || card.location || location,
+            salaryText: detail.salary || card.salary || undefined,
+            jdRaw: detail.description,
+            applyUrl,
+            applyType: "external",
+            source: "jooble",
+            sourceUrl: detail.sourceUrl,
+          },
+          cfBlocked: false,
+          error: null,
+        };
+      }
+      log.debug({ title: detail.title?.slice(0, 30) }, "Rejected: quality gate");
+      return { card, job: null, cfBlocked: false, error: null };
+    }
+
+    if (outcome.reason === "cf_blocked" || outcome.reason === "cf_body") {
+      return { card, job: null, cfBlocked: true, error: `cf:${outcome.reason}` };
+    }
+    return { card, job: null, cfBlocked: false, error: outcome.reason ?? null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCf = msg.includes("Cloudflare") || msg.includes("challenge");
+    return { card, job: null, cfBlocked: isCf, error: msg };
+  } finally {
+    if (page) {
+      try { await page.close(); } catch { /* already closed */ }
+    }
+  }
+}
+
+/**
+ * Run desc scraping with a bounded concurrency pool + abort-on-challenge.
+ *
+ * - At most `JOOBLE_DESC_CONCURRENCY` desc pages open simultaneously.
+ * - If any task detects CF challenge, the abort flag is set:
+ *   - No new tasks are dispatched
+ *   - In-flight tasks are allowed to finish and close their pages
+ * - randomDelay is applied between task dispatches (not between completions)
+ */
+async function scrapeDescsConcurrently(
+  context: import("playwright").BrowserContext,
+  cards: SearchCard[],
+  location: string,
+): Promise<{ jobs: NewJob[]; cfAborted: boolean; peakConcurrent: number }> {
+  const jobs: NewJob[] = [];
+  let cfAborted = false;
+  let activeTasks = 0;
+  let peakConcurrent = 0;
+
+  // Semaphore: resolvers waiting for a free slot
+  const waiters: Array<() => void> = [];
+
+  function acquireSlot(): Promise<void> {
+    if (activeTasks < JOOBLE_DESC_CONCURRENCY) {
+      activeTasks++;
+      peakConcurrent = Math.max(peakConcurrent, activeTasks);
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      waiters.push(() => {
+        activeTasks++;
+        peakConcurrent = Math.max(peakConcurrent, activeTasks);
+        resolve();
+      });
+    });
+  }
+
+  function releaseSlot(): void {
+    activeTasks--;
+    const next = waiters.shift();
+    if (next) next();
+  }
+
+  // Launch tasks, respecting concurrency + abort
+  const inFlight: Promise<void>[] = [];
+
+  for (let i = 0; i < cards.length; i++) {
+    if (cfAborted) {
+      log.info({ remaining: cards.length - i, reason: "cf_abort" }, "Skipping remaining desc tasks due to CF abort");
+      break;
+    }
+
+    // Apply delay between dispatches (not the first one)
+    if (i > 0) {
+      await randomDelay();
+    }
+
+    // Re-check abort after delay
+    if (cfAborted) {
+      log.info({ remaining: cards.length - i, reason: "cf_abort_after_delay" }, "Skipping remaining desc tasks due to CF abort");
+      break;
+    }
+
+    await acquireSlot();
+
+    const card = cards[i]!;
+    const taskPromise = (async () => {
+      try {
+        log.debug({ descUrl: card.descUrl.slice(0, 80), slot: activeTasks }, "Desc task starting");
+        const result = await scrapeOneDesc(context, card, location);
+
+        if (result.cfBlocked) {
+          cfAborted = true;
+          log.warn({ descUrl: card.descUrl.slice(0, 60) }, "CF challenge on desc page — setting abort flag");
+        }
+        if (result.job) {
+          jobs.push(result.job);
+        }
+        if (result.error && !result.cfBlocked) {
+          log.warn({ descUrl: card.descUrl.slice(0, 60), err: result.error }, "Desc scrape failed, skipping");
+        }
+      } finally {
+        releaseSlot();
+      }
+    })();
+
+    inFlight.push(taskPromise);
+  }
+
+  // Wait for all in-flight tasks to complete
+  await Promise.allSettled(inFlight);
+
+  return { jobs, cfAborted, peakConcurrent };
+}
+
 export async function scrapeJoobleLocal(
   keywords: string[],
   location: string,
@@ -203,17 +367,21 @@ export async function scrapeJoobleLocal(
   const allJobs: NewJob[] = [];
   let consecutiveCfBlocks = 0;
 
+  log.info({ descConcurrency: JOOBLE_DESC_CONCURRENCY, hardCap: HARD_CAP, maxSearchPages: MAX_SEARCH_PAGES },
+    "Jooble config: desc concurrency experiment");
+
   for (const keyword of keywords) {
     let session: PageSession | null = null;
     try {
       session = await createPage("jooble");
       const page = session.page;
 
-      log.info({ keyword, location, mode: "local-persistent-browser" }, "Jooble local discover starting");
+      log.info({ keyword, location, mode: "local-persistent-browser", descConcurrency: JOOBLE_DESC_CONCURRENCY }, "Jooble local discover starting");
 
       const allCards: SearchCard[] = [];
       const seenUrls = new Set<string>();
 
+      // === Search phase: serial, single page ===
       for (let pageNum = 1; pageNum <= MAX_SEARCH_PAGES; pageNum++) {
         if (allCards.length >= HARD_CAP) break;
         const searchUrl = `https://jooble.org/SearchResult?rgns=${encodeURIComponent(location)}&ukw=${encodeURIComponent(keyword)}&p=${pageNum}`;
@@ -223,10 +391,10 @@ export async function scrapeJoobleLocal(
         await page.waitForTimeout(3000);
 
         if (await isCfBlocked(page)) {
-          log.warn({ keyword, page: pageNum }, "CF blocked search page — aborting keyword");
+          log.warn({ keyword, page: pageNum }, "CF blocked search page — aborting entire run");
           consecutiveCfBlocks++;
-          if (consecutiveCfBlocks >= 3) {
-            throw new Error("Cloudflare: 3 consecutive CF blocks on search pages");
+          if (consecutiveCfBlocks >= JOOBLE_CF_THRESHOLD) {
+            throw new Error(`Cloudflare: ${consecutiveCfBlocks} CF block(s) on search pages — threshold=${JOOBLE_CF_THRESHOLD}`);
           }
           break;
         }
@@ -245,57 +413,36 @@ export async function scrapeJoobleLocal(
         await randomDelay();
       }
 
+      // === Desc phase: concurrent pool ===
       const toScrape = allCards.slice(0, HARD_CAP);
-      log.info({ keyword, toScrape: toScrape.length, hardCap: HARD_CAP }, "Scraping desc pages (slow mode)");
+      log.info({ keyword, toScrape: toScrape.length, hardCap: HARD_CAP, descConcurrency: JOOBLE_DESC_CONCURRENCY },
+        "Scraping desc pages (concurrent pool mode)");
 
-      for (let i = 0; i < toScrape.length; i++) {
-        const card = toScrape[i]!;
-        try {
-          const outcome = await scrapeDescPage(page, card.descUrl);
-          if (outcome.ok) {
-            const detail = outcome.detail;
-            if (detail.title.length >= 5 && detail.description.length >= 50) {
-              const applyUrl = isExternalEmployerApplyUrl(detail.applyUrl) ? detail.applyUrl : undefined;
-              allJobs.push({
-                companyName: detail.company || card.company || "Unknown",
-                jobTitle: detail.title,
-                location: detail.location || card.location || location,
-                salaryText: detail.salary || card.salary || undefined,
-                jdRaw: detail.description,
-                applyUrl,
-                applyType: "external",
-                source: "jooble",
-                sourceUrl: detail.sourceUrl,
-              });
-            } else {
-              log.debug({ title: detail.title?.slice(0, 30) }, "Rejected: quality gate");
-            }
-          } else if (outcome.reason === "cf_blocked" || outcome.reason === "cf_body") {
-            consecutiveCfBlocks++;
-            if (consecutiveCfBlocks >= 3) {
-              throw new Error("Cloudflare: 3 consecutive CF blocks on desc pages");
-            }
-          } else {
-            consecutiveCfBlocks = 0;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("Cloudflare")) throw err;
-          log.warn({ descUrl: card.descUrl.slice(0, 60), err: msg }, "Desc scrape failed, skipping");
-        }
+      // Keep the search session alive to prevent browser idle-close.
+      // Get context from the search page — desc tasks create their own pages from this context.
+      const context = page.context();
 
-        if (i < toScrape.length - 1) {
-          await randomDelay();
+      const descResult = await scrapeDescsConcurrently(context, toScrape, location);
+      allJobs.push(...descResult.jobs);
+
+      if (descResult.cfAborted) {
+        consecutiveCfBlocks++;
+        log.warn({ keyword, jobsBeforeAbort: descResult.jobs.length, peakConcurrent: descResult.peakConcurrent },
+          "Desc phase aborted due to CF challenge");
+        if (consecutiveCfBlocks >= JOOBLE_CF_THRESHOLD) {
+          throw new Error(`Cloudflare: CF challenge during desc phase — aborting run`);
         }
+      } else {
+        consecutiveCfBlocks = 0;
       }
 
-      log.info({ keyword, accepted: allJobs.length }, "Jooble local keyword complete");
+      log.info({ keyword, accepted: allJobs.length, peakConcurrent: descResult.peakConcurrent }, "Jooble local keyword complete");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isCf = msg.includes("Cloudflare") || msg.includes("challenge");
       if (isCf) {
         const failureType: FailureType = "cf_block";
-        await recordFailure("jooble", failureType);
+        await recordFailure("jooble", failureType, { maxFailures: 1, cooldownMs: JOOBLE_BREAKER_COOLDOWN_MS });
         throw err;
       }
       log.error({ keyword, err: msg }, "Jooble local keyword failed");
@@ -304,6 +451,6 @@ export async function scrapeJoobleLocal(
     }
   }
 
-  log.info({ totalJobs: allJobs.length, keywords: keywords.length, mode: "local-persistent-browser" }, "Jooble local discover complete");
+  log.info({ totalJobs: allJobs.length, keywords: keywords.length, mode: "local-persistent-browser", descConcurrency: JOOBLE_DESC_CONCURRENCY }, "Jooble local discover complete");
   return allJobs;
 }

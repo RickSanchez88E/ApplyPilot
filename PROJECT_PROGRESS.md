@@ -16,7 +16,7 @@
 - 队列：Redis + BullMQ
 - API 触发模式：dispatch-only，不再同步执行抓取
 - Docker 基础服务常驻；本地浏览器执行器运行在宿主机
-- Jooble 默认策略：本地持久化浏览器慢速模式（低并发、限速、hard cap、熔断）
+- Jooble 默认策略：**自动调度已禁用**（`JOOBLE_SCHEDULE_ENABLED=false`），CF challenge 态降级策略：`HARD_CAP=5, MAX_SEARCH_PAGES=1, DELAY=15-45s, CF_THRESHOLD=1 即停, COOLDOWN=12h`。仅支持手动触发。**desc 并发实验**：`JOOBLE_DESC_CONCURRENCY=2`（默认），每个 desc 页独立创建/关闭 page，abort-on-challenge 机制已实现。本地实验通过（2 jobs, 无 CF challenge, 77s）。
 - 自动化 profile：`sanchez`
 - apply discovery 只做到最终表单页发现与结构提取，不做自动 submit
 - 平台调度按 source 独立配置

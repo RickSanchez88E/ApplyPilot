@@ -218,6 +218,14 @@ export function getLocalBrowserConfig(): LocalBrowserConfig {
   return { ...config };
 }
 
+/**
+ * Access the current browser context (if launched).
+ * Used by jooble-local desc concurrent pool to create independent pages.
+ */
+export function getBrowserContext(): BrowserContext | null {
+  return instance?.context ?? null;
+}
+
 export function updateLocalBrowserConfig(partial: Partial<LocalBrowserConfig>): void {
   Object.assign(config, partial);
 }
@@ -270,25 +278,48 @@ function runDeferredProfileResyncIfNeeded(trigger: string): void {
  * persistent context causes the Chromium process to exit immediately.
  */
 async function closeDefaultPages(context: BrowserContext): Promise<void> {
-  const pages = context.pages();
+  await normalizeKeepAlivePages(context);
+}
+
+/**
+ * Ensure at most ONE about:blank / newtab keep-alive page exists.
+ * Closes all excess default pages. Call after launch AND after every task
+ * to prevent cumulative "hundreds of about:blank" buildup.
+ *
+ * IMPORTANT: Always keeps at least one page to prevent persistent context
+ * process from exiting.
+ */
+export async function normalizeKeepAlivePages(context?: BrowserContext): Promise<{ closedCount: number; remaining: number }> {
+  const ctx = context ?? instance?.context;
+  if (!ctx) return { closedCount: 0, remaining: 0 };
+
+  const pages = ctx.pages();
   const defaultUrls = new Set(["about:blank", "chrome://newtab/", "edge://newtab/"]);
-  const toClose = pages.filter((p) => {
+  const defaultPages = pages.filter((p) => {
     try { return defaultUrls.has(p.url()); } catch { return false; }
   });
+  const nonDefaultPages = pages.filter((p) => {
+    try { return !defaultUrls.has(p.url()); } catch { return true; }
+  });
 
-  // Keep at least one page to prevent browser process exit
-  const maxCloseable = Math.max(0, toClose.length - 1);
-  for (let i = 0; i < maxCloseable; i++) {
-    const page = toClose[i];
-    if (!page) continue;
+  // If there are non-default pages, close ALL default pages.
+  // If there are ONLY default pages, keep exactly one.
+  const keepCount = nonDefaultPages.length > 0 ? 0 : 1;
+  const toClose = defaultPages.slice(keepCount);
+
+  let closedCount = 0;
+  for (const p of toClose) {
     try {
-      const url = page.url();
-      await page.close();
-      log.debug({ url }, "Closed default/stale page from persistent context");
-    } catch {
-      // Page may already be closed
-    }
+      await p.close();
+      closedCount++;
+    } catch { /* already closed */ }
   }
+
+  const remaining = defaultPages.length - closedCount;
+  if (closedCount > 0) {
+    log.debug({ closedCount, remaining }, "normalizeKeepAlivePages: cleaned excess default pages");
+  }
+  return { closedCount, remaining };
 }
 
 async function launchBrowser(): Promise<BrowserInstance> {
@@ -614,6 +645,8 @@ export async function createPage(source: string): Promise<PageSession> {
       instance.lastActivityAt = Date.now();
       resetIdleTimer();
       log.debug({ source, pageId, activePages: instance.activePagesCount }, "Page closed (lifecycle-tracked)");
+      // P0: Normalize default pages after every task to prevent about:blank buildup
+      await normalizeKeepAlivePages(instance.context).catch(() => {});
     }
   };
 

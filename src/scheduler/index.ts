@@ -35,14 +35,24 @@ export interface SourceScheduleConfig {
   intervalMs: number;
 }
 
-const DEFAULT_SCHEDULES: SourceScheduleConfig[] = [
+/**
+ * Jooble is excluded from automatic scheduling by default because it is
+ * in a persistent Cloudflare challenge state. Set JOOBLE_SCHEDULE_ENABLED=true
+ * to opt-in. Manual trigger via API remains available regardless.
+ */
+const JOOBLE_SCHEDULE_ENABLED = process.env.JOOBLE_SCHEDULE_ENABLED === "true";
+
+const BASE_SCHEDULES: SourceScheduleConfig[] = [
   { source: "linkedin",  intervalMs: 20 * 60 * 1000 },
   { source: "reed",      intervalMs: 30 * 60 * 1000 },
   { source: "remoteok",  intervalMs: 60 * 60 * 1000 },
   { source: "devitjobs", intervalMs: 2 * 60 * 60 * 1000 },
   { source: "hn_hiring", intervalMs: 6 * 60 * 60 * 1000 },
-  { source: "jooble",    intervalMs: 4 * 60 * 60 * 1000 },
 ];
+
+const DEFAULT_SCHEDULES: SourceScheduleConfig[] = JOOBLE_SCHEDULE_ENABLED
+  ? [...BASE_SCHEDULES, { source: "jooble", intervalMs: 4 * 60 * 60 * 1000 }]
+  : BASE_SCHEDULES;
 
 const sourceTimers = new Map<string, ReturnType<typeof setInterval>>();
 let expiryTimer: ReturnType<typeof setInterval> | null = null;
