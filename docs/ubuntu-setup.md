@@ -170,53 +170,38 @@ npx tsx src/queue/local-browser-worker.ts
 
 ## systemd 开机自启动
 
-创建 systemd service 文件：
+仓库自带一键安装脚本，会自动创建 3 个 systemd unit（Docker 服务 + 宿主机 Worker + 统一 Target）：
 
 ```bash
-sudo tee /etc/systemd/system/job-scraper.service > /dev/null << 'EOF'
-[Unit]
-Description=Job Scraper - Docker Services
-After=docker.service
-Requires=docker.service
+chmod +x scripts/autostart-linux-setup.sh
+sudo ./scripts/autostart-linux-setup.sh
+```
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/home/<你的用户名>/linkedin-job-scraper
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-User=<你的用户名>
+安装后常用命令：
 
-[Install]
-WantedBy=multi-user.target
-EOF
+```bash
+# 启动全部
+sudo systemctl start job-scraper.target
 
-sudo tee /etc/systemd/system/job-scraper-worker.service > /dev/null << 'EOF'
-[Unit]
-Description=Job Scraper - Local Browser Worker
-After=job-scraper.service
-Requires=job-scraper.service
-
-[Service]
-Type=simple
-WorkingDirectory=/home/<你的用户名>/linkedin-job-scraper
-EnvironmentFile=/home/<你的用户名>/linkedin-job-scraper/.env
-ExecStart=/usr/bin/npx tsx src/queue/local-browser-worker.ts
-Restart=on-failure
-RestartSec=10
-User=<你的用户名>
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 替换 <你的用户名> 后启用
-sudo systemctl daemon-reload
-sudo systemctl enable job-scraper job-scraper-worker
-sudo systemctl start job-scraper job-scraper-worker
+# 停止全部
+sudo systemctl stop job-scraper.target
 
 # 查看状态
-sudo systemctl status job-scraper job-scraper-worker
+sudo systemctl status job-scraper-docker job-scraper-worker
+
+# Worker 实时日志
+journalctl -u job-scraper-worker -f
+
+# 或查看文件日志
+tail -f tmp/local-browser-worker.log
+```
+
+卸载自启动：
+
+```bash
+sudo systemctl disable --now job-scraper.target
+sudo rm /etc/systemd/system/job-scraper-*
+sudo systemctl daemon-reload
 ```
 
 ---
