@@ -602,7 +602,88 @@ app.post("/api/apply-discovery/backfill", async (req, res) => {
   }
 });
 
+// ── Apply discovery: final form URLs (for verification) ──────
+app.get("/api/apply-discovery/final-forms", async (req, res) => {
+  try {
+    const source = req.query.source as string | undefined;
+    const status = (req.query.status as string) || "final_form_reached";
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const offset = Number(req.query.offset) || 0;
+
+    const conditions: string[] = [`adr.apply_discovery_status = $1`];
+    const params: unknown[] = [status];
+    let idx = 2;
+
+    if (source) {
+      conditions.push(`adr.source = $${idx++}`);
+      params.push(source);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+
+    const countRes = await query<{ cnt: number }>(
+      `SELECT COUNT(*)::int as cnt FROM apply_discovery_results adr ${where}`,
+      params,
+    );
+    const total = countRes.rows[0]?.cnt ?? 0;
+
+    const dataParams = [...params, limit, offset];
+    const rows = await query(
+      `SELECT 
+        adr.job_key,
+        adr.source,
+        jc.company,
+        jc.title,
+        jc.location,
+        adr.apply_discovery_status as status,
+        adr.initial_apply_url,
+        adr.resolved_apply_url,
+        adr.final_form_url,
+        adr.form_provider,
+        adr.resolver_version,
+        (adr.form_schema_snapshot->>'fieldCount')::int as field_count,
+        adr.login_required,
+        adr.registration_required,
+        adr.last_resolution_error,
+        adr.updated_at
+      FROM apply_discovery_results adr
+      JOIN jobs_current jc ON jc.job_key = adr.job_key
+      ${where}
+      ORDER BY adr.updated_at DESC
+      LIMIT $${idx++} OFFSET $${idx++}`,
+      dataParams,
+    );
+
+    // Domain distribution
+    const domainParams = params.slice(0, source ? 2 : 1);
+    const domainRes = status === "final_form_reached" ? await query(
+      `SELECT 
+        substring(adr.resolved_apply_url from '://([^/]+)') as domain,
+        COUNT(*)::int as cnt
+      FROM apply_discovery_results adr
+      ${where}
+        AND adr.resolved_apply_url IS NOT NULL
+      GROUP BY domain
+      ORDER BY cnt DESC
+      LIMIT 30`,
+      domainParams,
+    ) : { rows: [] };
+
+    res.json({
+      results: rows.rows,
+      total,
+      limit,
+      offset,
+      domains: domainRes.rows,
+    });
+  } catch (err) {
+    log.error({ err }, "Failed to fetch final forms");
+    res.status(500).json({ error: "Failed to fetch final forms" });
+  }
+});
+
 // ── Release lease (manual cleanup) ────────────────────────────
+
 app.post("/api/lease/:source/release", async (req, res) => {
   const { source } = req.params;
   const { holder } = req.body ?? {};

@@ -8,6 +8,7 @@ tmp-chrome-*/
 .cdp-profile/
 .cdp-profiles-proxy/
 .local-browser-data/
+.local-browser-runtime/
 *.db
 *.sqlite
 *.sqlite3
@@ -15,3 +16,7 @@ data/
 scripts/search-debug.png
 scripts/camoufox-jooble-results.txt
 pnpm-lock.yaml
+tmp/
+
+# for-loop runtime state
+.antigravity/

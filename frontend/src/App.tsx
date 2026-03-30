@@ -5,9 +5,11 @@ import { usePolling } from './hooks/usePolling';
 
 import { OverviewPage } from './components/OverviewPage';
 import { PlatformPage } from './components/PlatformPage';
+import { ApplyDiscoveryPage } from './components/ApplyDiscoveryPage';
 
 const PLATFORM_TABS = [
   { key: 'overview', labelKey: 'nav.overview', label: 'Overview' },
+  { key: 'apply_discovery', label: 'Apply Discovery' },
   { key: 'linkedin', label: 'LinkedIn' },
   { key: 'reed', label: 'Reed' },
   { key: 'jooble', label: 'Jooble' },
@@ -106,6 +108,8 @@ export default function App() {
       <main className="flex-1 p-3 md:p-6 max-w-[1600px] mx-auto w-full">
         {activeTab === 'overview' ? (
           <OverviewPage locale={locale} />
+        ) : activeTab === 'apply_discovery' ? (
+          <ApplyDiscoveryPage />
         ) : (
           <PlatformPage key={activeTab} source={activeTab} locale={locale} />
         )}

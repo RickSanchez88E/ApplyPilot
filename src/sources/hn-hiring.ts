@@ -4,6 +4,11 @@
  *
  * AUDIT FIX (2026-03-26): Added `time` field from HN comment as `postedDate`
  * so orchestrator post-filter can actually work.
+ *
+ * AUDIT FIX (2026-03-30): Extract company career URLs from comment HTML
+ * as applyUrl. Previously only the HN item link was used, causing the
+ * apply-resolver to navigate to ycombinator.com/apply/ instead of the
+ * actual employer's ATS page. This blocked ~141 jobs at requires_login.
  */
 import type { SourceAdapter, FetchOptions } from "./adapter.js";
 import type { NewJob } from "../shared/types.js";
@@ -11,6 +16,78 @@ import { createChildLogger } from "../lib/logger.js";
 
 const log = createChildLogger({ module: "source-hn" });
 const HN_API = "https://hacker-news.firebaseio.com/v0";
+
+/**
+ * Known ATS / career-page patterns — URLs matching these get highest priority.
+ */
+const ATS_URL_PATTERNS = [
+  /greenhouse\.io/i, /boards\.greenhouse/i,
+  /lever\.co/i, /jobs\.lever/i,
+  /ashbyhq\.com/i, /bamboohr\.com/i,
+  /smartrecruiters\.com/i, /workday\.com/i, /myworkdayjobs/i,
+  /icims\.com/i, /jobvite\.com/i, /recruitee\.com/i,
+  /breezy\.hr/i, /applytojob\.com/i,
+  /workable\.com/i,
+];
+
+const CAREER_URL_PATTERNS = [
+  /\/careers?\b/i, /\/jobs?\b/i, /\/openings?\b/i,
+  /\/positions?\b/i, /\/hiring\b/i, /\/apply\b/i,
+  /\/vacancies/i, /\/join\b/i, /\/work-with-us/i,
+];
+
+const SKIP_DOMAINS = new Set([
+  "news.ycombinator.com",
+  "www.ycombinator.com",
+  "ycombinator.com",
+  "github.com",
+  "twitter.com",
+  "x.com",
+  "linkedin.com",
+  "www.linkedin.com",
+  "en.wikipedia.org",
+]);
+
+/**
+ * Extract the best apply/career URL from an HN comment's HTML.
+ * Priority: ATS domain > /careers or /jobs path > company homepage.
+ */
+function extractBestApplyUrl(html: string): string | undefined {
+  // Extract all href values from <a> tags
+  const hrefRegex = /href="([^"]+)"/gi;
+  const urls: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = hrefRegex.exec(html)) !== null) {
+    const url = match[1]!
+      .replace(/&amp;/g, "&")
+      .replace(/&#x2F;/g, "/")
+      .replace(/&#x3D;/g, "=")
+      .trim();
+    if (url.startsWith("http")) {
+      try {
+        const parsed = new URL(url);
+        if (!SKIP_DOMAINS.has(parsed.hostname)) {
+          urls.push(url);
+        }
+      } catch {
+        // invalid URL, skip
+      }
+    }
+  }
+
+  if (urls.length === 0) return undefined;
+
+  // Score each URL
+  const scored = urls.map((url) => {
+    let score = 10; // base score for any external URL
+    if (ATS_URL_PATTERNS.some((p) => p.test(url))) score += 100;
+    if (CAREER_URL_PATTERNS.some((p) => p.test(url))) score += 50;
+    return { url, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.url;
+}
 
 export const hnHiringAdapter: SourceAdapter = {
   name: "hn_hiring",
@@ -21,9 +98,6 @@ export const hnHiringAdapter: SourceAdapter = {
   async fetchJobs(keywords: string[], location: string, _options?: FetchOptions): Promise<NewJob[]> {
     try {
       // Step 1: Find the LATEST "Who is hiring?" thread.
-      // CRITICAL FIX: Use search_by_date to sort by recency instead of relevance.
-      // The default /search endpoint returns relevance-ranked results (e.g., a 2020 post).
-      // Also filter title to "Ask HN: Who is hiring?" to avoid generic matches.
       const searchRes = await fetch(
         "https://hn.algolia.com/api/v1/search_by_date?query=%22Ask+HN%3A+Who+is+hiring%22&tags=story,ask_hn&hitsPerPage=1",
         { signal: AbortSignal.timeout(10000) },
@@ -54,6 +128,7 @@ export const hnHiringAdapter: SourceAdapter = {
       // Step 3: Fetch comments in parallel (batches of 20)
       const allJobs: NewJob[] = [];
       const keywordsLower = keywords.map((k) => k.toLowerCase());
+      let urlExtracted = 0;
 
       for (let i = 0; i < commentIds.length; i += 20) {
         const batch = commentIds.slice(i, i + 20);
@@ -89,12 +164,17 @@ export const hnHiringAdapter: SourceAdapter = {
           const title = parts[1] ?? "Software Engineer";
           const loc = parts.find((p) => p.toLowerCase().includes("london") || p.toLowerCase().includes("remote")) ?? location;
 
+          // Extract company career URL from comment HTML
+          const extractedUrl = extractBestApplyUrl(text);
+          if (extractedUrl) urlExtracted++;
+
           allJobs.push({
             companyName: company.slice(0, 100),
             jobTitle: title.slice(0, 200),
             location: loc.slice(0, 200),
             jdRaw: plainText.slice(0, 5000),
             applyType: "external",
+            applyUrl: extractedUrl,
             source: "hn_hiring",
             sourceUrl: `https://news.ycombinator.com/item?id=${c.id}`,
             // FIX: Use HN comment timestamp as postedDate so post-filter works
@@ -103,7 +183,11 @@ export const hnHiringAdapter: SourceAdapter = {
         }
       }
 
-      log.info({ total: allJobs.length, threadComments: commentIds.length }, "HN hiring parsing complete");
+      log.info({
+        total: allJobs.length,
+        threadComments: commentIds.length,
+        urlExtracted,
+      }, "HN hiring parsing complete");
       return allJobs;
     } catch (err) {
       log.error({ err }, "HN hiring fetch failed");

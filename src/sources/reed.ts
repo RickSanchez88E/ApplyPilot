@@ -1,6 +1,11 @@
 /**
  * Reed API — Free, requires API key (basic auth).
  * 2000 requests/hour. UK job board.
+ *
+ * AUDIT FIX (2026-03-30): Use the details API to fetch `externalUrl` for each
+ * job. The search API only returns reed.co.uk description pages, but ~40% of
+ * jobs have an externalUrl pointing to the actual employer ATS (Accenture,
+ * Appcast, etc.). This dramatically improves final_form discovery.
  */
 import type { SourceAdapter, FetchOptions } from "./adapter.js";
 import type { NewJob } from "../shared/types.js";
@@ -8,6 +13,25 @@ import { createChildLogger } from "../lib/logger.js";
 
 const log = createChildLogger({ module: "source-reed" });
 const BASE_URL = "https://www.reed.co.uk/api/1.0/search";
+const DETAILS_URL = "https://www.reed.co.uk/api/1.0/jobs";
+
+/** Fetch job details from Reed API to get externalUrl */
+async function fetchJobDetails(
+  jobId: number,
+  auth: string,
+): Promise<{ externalUrl?: string; jobDescription?: string } | null> {
+  try {
+    const res = await fetch(`${DETAILS_URL}/${jobId}`, {
+      headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { externalUrl?: string; jobDescription?: string };
+    return data;
+  } catch {
+    return null;
+  }
+}
 
 export const reedAdapter: SourceAdapter = {
   name: "reed",
@@ -51,22 +75,50 @@ export const reedAdapter: SourceAdapter = {
         }
 
         const data = (await res.json()) as { results: any[] };
-        log.info({ keyword: kw, count: data.results?.length ?? 0 }, "Reed results");
+        log.info({ keyword: kw, count: data.results?.length ?? 0 }, "Reed search results");
 
-        for (const item of data.results ?? []) {
-          allJobs.push({
-            companyName: item.employerName ?? "Unknown",
-            jobTitle: item.jobTitle ?? kw,
-            location: item.locationName ?? location,
-            salaryText: formatReedSalary(item.minimumSalary, item.maximumSalary),
-            jdRaw: item.jobDescription ?? "",
-            applyUrl: item.jobUrl ?? null,
-            applyType: "external",
-            source: "reed",
-            sourceUrl: item.jobUrl ?? null,
-            postedDate: parseReedDate(item.date),
-          });
+        // Fetch details in batches of 10 to get externalUrl
+        const results = data.results ?? [];
+        let externalUrlCount = 0;
+
+        for (let i = 0; i < results.length; i += 10) {
+          const batch = results.slice(i, i + 10);
+          const details = await Promise.all(
+            batch.map((item: any) =>
+              item.jobId ? fetchJobDetails(item.jobId, auth) : Promise.resolve(null),
+            ),
+          );
+
+          for (let j = 0; j < batch.length; j++) {
+            const item = batch[j];
+            const detail = details[j];
+            const externalUrl = detail?.externalUrl || null;
+            if (externalUrl) externalUrlCount++;
+
+            // Use externalUrl as applyUrl when available, keep reed URL as sourceUrl
+            const reedUrl = item.jobUrl ?? null;
+            const enrichedDescription = detail?.jobDescription || item.jobDescription || "";
+
+            allJobs.push({
+              companyName: item.employerName ?? "Unknown",
+              jobTitle: item.jobTitle ?? kw,
+              location: item.locationName ?? location,
+              salaryText: formatReedSalary(item.minimumSalary, item.maximumSalary),
+              jdRaw: enrichedDescription || "",
+              applyUrl: externalUrl ?? reedUrl,
+              applyType: "external",
+              source: "reed",
+              sourceUrl: reedUrl,
+              postedDate: parseReedDate(item.date),
+            });
+          }
         }
+
+        log.info({
+          keyword: kw,
+          total: results.length,
+          externalUrlCount,
+        }, "Reed details enrichment complete");
       } catch (err) {
         log.error({ err, kw }, "Reed fetch failed");
       }
@@ -75,6 +127,7 @@ export const reedAdapter: SourceAdapter = {
     return allJobs;
   },
 };
+
 
 function formatReedSalary(min?: number, max?: number): string | undefined {
   if (!min && !max) return undefined;
