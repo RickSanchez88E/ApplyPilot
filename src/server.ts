@@ -15,6 +15,7 @@ import { releaseLease, isLeaseHeld } from "./scheduler/source-lease.js";
 import { getBreakerState, forceResetBreaker, isSourceInCooldown } from "./browser/circuit-breaker.js";
 import { getApplyDiscoveryStats, getRecentApplyDiscoveries } from "./repositories/apply-discovery-repository.js";
 import { dispatchApplyDiscoveryBackfill } from "./domain/apply-discovery/dispatch.js";
+import { runDeadLetterMaintenance } from "./domain/dead-letter/maintenance.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +28,12 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
 const serverStartedAt = Date.now();
+const DEAD_LETTER_SCAN_INTERVAL_MS =
+  parseInt(process.env.DEAD_LETTER_SCAN_INTERVAL_MS ?? String(6 * 60 * 60 * 1000), 10);
+const DEAD_LETTER_SCAN_BATCH_SIZE =
+  parseInt(process.env.DEAD_LETTER_SCAN_BATCH_SIZE ?? "200", 10);
+const DEAD_LETTER_MAINTENANCE_POLL_MS =
+  parseInt(process.env.DEAD_LETTER_MAINTENANCE_POLL_MS ?? "30000", 10);
 
 // ── Status ────────────────────────────────────────────────────
 app.get("/api/status", (_req, res) => {
@@ -182,6 +189,47 @@ app.post("/api/jobs/recheck-expiry", async (req, res) => {
   } catch (err) {
     log.error({ err }, "Expiry recheck dispatch failed");
     res.status(500).json({ error: "Expiry recheck dispatch failed" });
+  }
+});
+
+// ── Dead Letter Scan (manual trigger) ─────
+app.post("/api/dead-letter/scan", async (req, res) => {
+  const batchSize = Math.min(Number(req.body?.batchSize) || DEAD_LETTER_SCAN_BATCH_SIZE, 500);
+  const force = req.body?.force !== false;
+  const sources = Array.isArray(req.body?.sources)
+    ? req.body.sources.filter((x: unknown): x is string => typeof x === "string" && x.trim().length > 0)
+    : undefined;
+
+  try {
+    const maintenance = await runDeadLetterMaintenance({
+      batchSize,
+      sources,
+      force,
+      intervalMs: DEAD_LETTER_SCAN_INTERVAL_MS,
+      trigger: "manual",
+    });
+
+    if (maintenance.status === "skipped_lock") {
+      return res.status(409).json({
+        error: "dead_letter_locked",
+        message: "Dead-letter scan is already running on another instance",
+      });
+    }
+
+    if (maintenance.status === "skipped_not_due") {
+      return res.status(202).json({ status: "skipped_not_due" });
+    }
+
+    res.json({
+      status: "ok",
+      batchSize,
+      force,
+      sources: sources ?? null,
+      result: maintenance.detail,
+    });
+  } catch (err) {
+    log.error({ err }, "Dead-letter scan API failed");
+    res.status(500).json({ error: "Dead-letter scan failed" });
   }
 });
 
@@ -694,6 +742,28 @@ app.post("/api/lease/:source/release", async (req, res) => {
     res.status(500).json({ error: "Failed to release lease" });
   }
 });
+
+setInterval(() => {
+  runDeadLetterMaintenance({
+    batchSize: DEAD_LETTER_SCAN_BATCH_SIZE,
+    force: false,
+    intervalMs: DEAD_LETTER_SCAN_INTERVAL_MS,
+    trigger: "interval",
+  }).catch((err: unknown) => {
+    log.error({ err }, "Scheduled dead-letter maintenance failed");
+  });
+}, DEAD_LETTER_MAINTENANCE_POLL_MS);
+
+setTimeout(() => {
+  runDeadLetterMaintenance({
+    batchSize: DEAD_LETTER_SCAN_BATCH_SIZE,
+    force: false,
+    intervalMs: DEAD_LETTER_SCAN_INTERVAL_MS,
+    trigger: "startup",
+  }).catch((err: unknown) => {
+    log.error({ err }, "Initial dead-letter maintenance failed");
+  });
+}, 5000);
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 app.listen(PORT, "0.0.0.0", () => {

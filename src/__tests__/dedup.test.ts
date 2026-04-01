@@ -15,6 +15,12 @@ vi.mock("../repositories/jobs-repository.js", () => ({
 vi.mock("../repositories/snapshot-repository.js", () => ({
   insertSnapshot: vi.fn().mockResolvedValue(1n),
 }));
+vi.mock("../domain/apply-discovery/dispatch.js", () => ({
+  enqueueResolveApplyForJob: vi.fn().mockResolvedValue("job-1"),
+}));
+vi.mock("../domain/expiry/dispatch.js", () => ({
+  enqueueRecheckExpiryForJob: vi.fn().mockResolvedValue("job-2"),
+}));
 
 describe("dedup", () => {
   beforeEach(() => {

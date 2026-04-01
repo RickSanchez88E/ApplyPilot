@@ -79,6 +79,8 @@ export interface DeadLetterResult {
   checked: number;
   expired: number;
   deleted: number;
+  jobsCurrentDeleted: number;
+  archived: number;
   errors: number;
   details: { id: number; title: string; source: string; url: string }[];
 }
@@ -93,7 +95,15 @@ export async function runDeadLetterScan(
   batchSize = 50,
   sources?: string[],
 ): Promise<DeadLetterResult> {
-  const result: DeadLetterResult = { checked: 0, expired: 0, deleted: 0, errors: 0, details: [] };
+  const result: DeadLetterResult = {
+    checked: 0,
+    expired: 0,
+    deleted: 0,
+    jobsCurrentDeleted: 0,
+    archived: 0,
+    errors: 0,
+    details: [],
+  };
 
   // Get all source schemas
   const schemaQuery = sources
@@ -126,7 +136,41 @@ export async function runDeadLetterScan(
           result.expired++;
           await query(`DELETE FROM ${nspname}.jobs WHERE id = $1`, [job.id]);
           result.deleted++;
+
+          const candidateUrls = [job.apply_url, job.source_url]
+            .map((u) => u?.trim() ?? "")
+            .filter((u) => u.length > 0 && u !== "#");
+
+          if (candidateUrls.length > 0) {
+            const cleanup = await query(
+              `DELETE FROM public.jobs_current
+               WHERE source = $1
+                 AND (
+                   canonical_url = ANY($2::text[])
+                   OR apply_url = ANY($2::text[])
+                 )`,
+              [sourceName, candidateUrls],
+            );
+            result.jobsCurrentDeleted += cleanup.rowCount ?? 0;
+          }
+
           const url = sourceName === "jooble" ? job.source_url || job.apply_url : job.apply_url || job.source_url;
+
+          await query(
+            `INSERT INTO public.dead_letter_records (
+               source, source_schema, source_job_id, title, url, reason, payload
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+            [
+              sourceName,
+              nspname,
+              job.id,
+              job.job_title,
+              url,
+              "expired_detected",
+              JSON.stringify({ applyUrl: job.apply_url, sourceUrl: job.source_url }),
+            ],
+          );
+          result.archived++;
           result.details.push({
             id: job.id,
             title: job.job_title,
@@ -145,9 +189,23 @@ export async function runDeadLetterScan(
   }
 
   log.info(
-    { checked: result.checked, expired: result.expired, deleted: result.deleted },
+    {
+      checked: result.checked,
+      expired: result.expired,
+      deleted: result.deleted,
+      jobsCurrentDeleted: result.jobsCurrentDeleted,
+      archived: result.archived,
+    },
     "Dead letter scan complete",
   );
 
   return result;
+}
+
+export async function purgeDeadLetterRecords(): Promise<number> {
+  const res = await query(
+    `DELETE FROM public.dead_letter_records
+     WHERE purge_after <= NOW()`,
+  );
+  return res.rowCount ?? 0;
 }

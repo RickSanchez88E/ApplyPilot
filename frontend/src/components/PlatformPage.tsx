@@ -52,6 +52,8 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
   const [dispatching, setDispatching] = useState(false);
   const [dispatchMsg, setDispatchMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [dlqRunning, setDlqRunning] = useState(false);
+  const [dlqMsg, setDlqMsg] = useState<string | null>(null);
   const [scrapeTimeFilter, setScrapeTimeFilter] = useState('r86400');
   const [ingestFilter, setIngestFilter] = useState('');
   const { progress, connected } = useProgress();
@@ -121,6 +123,29 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
     } catch (err: unknown) {
       setDispatching(false);
       setErrorMsg(err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
+  const runDlqScan = async () => {
+    setDlqRunning(true);
+    setDlqMsg(null);
+    try {
+      const resp = await fetch("/api/dead-letter/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sources: [source], batchSize: 50, force: true }),
+      });
+      const data = await resp.json() as Record<string, unknown>;
+      if (!resp.ok) throw new Error((data.error as string) || ("HTTP " + resp.status));
+      const result = data.result as Record<string, unknown> | undefined;
+      const scanned = (result?.scanned as Record<string, number> | undefined)?.checked ?? 0;
+      const deleted = (result?.scanned as Record<string, number> | undefined)?.deleted ?? 0;
+      setDlqMsg(t("platform.dlqDone", locale) + ": " + deleted + "/" + scanned);
+      setTimeout(() => setDlqMsg(null), 6000);
+    } catch (err) {
+      setDlqMsg(err instanceof Error ? err.message : "DLQ failed");
+    } finally {
+      setDlqRunning(false);
     }
   };
 
@@ -202,6 +227,20 @@ export function PlatformPage({ source, locale }: { source: string; locale: Local
               <ShieldAlert className="w-3 h-3" />
               {t('platform.forceTrigger', locale)}
             </button>
+          )}
+
+          <button
+            onClick={runDlqScan}
+            disabled={dlqRunning}
+            className="w-full mt-2 flex justify-center items-center gap-1.5 py-1.5 px-3 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] text-xs font-medium hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-all disabled:opacity-40"
+          >
+            {dlqRunning ? t("platform.dlqRunning", locale) : t("platform.runDlq", locale)}
+          </button>
+
+          {dlqMsg && (
+            <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[11px] font-mono text-[var(--color-text-secondary)] mt-2 text-center">
+              {dlqMsg}
+            </motion.p>
           )}
 
           {dispatchMsg && (

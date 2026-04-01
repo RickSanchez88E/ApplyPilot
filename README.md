@@ -205,7 +205,8 @@ docker compose up -d
 | GET | `/api/jobs` | 分页列表，`source`、`sortBy`、`timeRange` 等 |
 | GET | `/api/jobs/stats` | 汇总统计、按源分布、24h 小时活动 等 |
 | GET | `/api/jobs/duplicates` | 跨平台 `content_hash` 重复项 |
-| POST | `/api/dead-letter/scan` | 死信/过期清理扫描 |
+| POST | `/api/jobs/recheck-expiry` | 将候选岗位投递到 `recheck_expiry` 队列（状态判定） |
+| POST | `/api/dead-letter/scan` | 死信扫描并直接删除已过期岗位（支持定时巡检） |
 
 列表类接口对 `posted_date` 等字段会附加 **`posted_date_precision`**（`day` | `datetime`）与 **`freshness_gap_seconds`** 等计算字段，供前端正确展示与审计。
 

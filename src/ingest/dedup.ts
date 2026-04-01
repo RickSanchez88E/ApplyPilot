@@ -20,6 +20,7 @@ import { shouldSnapshot } from "../domain/dedup/snapshot-policy.js";
 import { upsertJob } from "../repositories/jobs-repository.js";
 import { insertSnapshot } from "../repositories/snapshot-repository.js";
 import { enqueueResolveApplyForJob } from "../domain/apply-discovery/dispatch.js";
+import { enqueueRecheckExpiryForJob } from "../domain/expiry/dispatch.js";
 
 const log = createChildLogger({ module: "dedup" });
 
@@ -180,6 +181,17 @@ export async function dedupAndInsert(jobs: ReadonlyArray<NewJob>): Promise<Dedup
             log.warn(
               { err, source: job.source, jobKey },
               "Auto dispatch resolve_apply failed (non-fatal)",
+            );
+          }
+        }
+
+        if (upsertResult.isNew) {
+          try {
+            await enqueueRecheckExpiryForJob({ jobKey, source: job.source });
+          } catch (err) {
+            log.warn(
+              { err, source: job.source, jobKey },
+              "Auto dispatch recheck_expiry failed (non-fatal)",
             );
           }
         }

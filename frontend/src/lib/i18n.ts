@@ -37,6 +37,9 @@ const translations: Record<string, Record<Locale, string>> = {
   'platform.cooldown': { en: 'Source in cooldown', zh: '来源冷却中' },
   'platform.busy': { en: 'Source busy', zh: '来源忙碌' },
   'platform.forceTrigger': { en: 'Force trigger (override cooldown)', zh: '强制触发（忽略冷却）' },
+  'platform.runDlq': { en: 'Run DLQ Scan', zh: '执行 DLQ 巡检' },
+  'platform.dlqRunning': { en: 'Running DLQ...', zh: 'DLQ 执行中...' },
+  'platform.dlqDone': { en: 'DLQ done', zh: 'DLQ 完成' },
 
   // Apply Discovery
   'apply.title': { en: 'Apply Discovery', zh: '申请链路发现' },
